@@ -75,6 +75,8 @@ class InspectionForm(StatesGroup):
     body_type = State()
     body_color = State()
     wheel_radius = State()
+    paint_type = State()
+    display_size = State()
 
     seat_material = State()
     wheel_type = State()
@@ -243,6 +245,8 @@ EQUIPMENT = {
         "Спортивный обвес",
 
         "Размер колёс",
+        "Тип лакокрасочного покрытия",
+        "Размер дисплея",
         "Тип дисков",
         "Электропривод крышки багажника",
     ],
@@ -420,6 +424,8 @@ def build_manual_equipment_queue():
         "Тип кузова",
         "Цвет кузова",
         "Размер колёс",
+        "Тип лакокрасочного покрытия",
+        "Размер дисплея",
         "Тип дисков",
         "Материал сидений",
         "Цвет салона",
@@ -451,6 +457,8 @@ def create_empty_equipment_results(
     body_type,
     body_color,
     wheel_radius,
+    paint_type,
+    display_size,
     seat_material,
     wheel_type,
     interior_color,
@@ -492,6 +500,8 @@ def create_empty_equipment_results(
     }
 
     direct_values = {
+        ("ЭКСТЕРЬЕР", "Тип лакокрасочного покрытия"): paint_type,
+        ("МУЛЬТИМЕДИА", "Размер дисплея"): display_size,
         ("ЭКСТЕРЬЕР", "Тип дисков"): wheel_type,
         ("ИНТЕРЬЕР", "Материал сидений"): seat_material,
         ("ИНТЕРЬЕР", "Цвет салона"): interior_color,
@@ -732,7 +742,7 @@ def make_lkp_map(
 
     draw.text(
         (60, 110),
-        "ЮРМАКС",
+        "ЮМАКС",
         font=subtitle_font,
         fill=(70, 190, 130)
     )
@@ -1052,7 +1062,7 @@ def pdf_header_footer(
     canvas.drawString(
         15 * mm,
         height - 13 * mm,
-        "ЮРМАКС"
+        "ЮМАКС"
     )
 
     canvas.setFont(
@@ -1082,7 +1092,7 @@ def pdf_header_footer(
     canvas.drawString(
         15 * mm,
         10 * mm,
-        "ЮРМАКС"
+        "ЮМАКС"
     )
 
     canvas.drawRightString(
@@ -1445,9 +1455,9 @@ def create_pdf(
 
         bottomMargin=18 * mm,
 
-        title="ЮРМАКС — Акт осмотра автомобиля",
+        title="ЮМАКС — Акт осмотра автомобиля",
 
-        author="ЮРМАКС",
+        author="ЮМАКС",
     )
 
     title_style = ParagraphStyle(
@@ -1531,7 +1541,7 @@ def create_pdf(
 
         Paragraph(
 
-            "ЮРМАКС",
+            "ЮМАКС",
 
             ParagraphStyle(
                 "Brand",
@@ -2455,7 +2465,7 @@ async def generate_and_send_report(
         await message.answer(
 
             "Готово.\n\n"
-            "PDF-отчёт ЮРМАКС сформирован.",
+            "PDF-отчёт ЮМАКС сформирован.",
 
             reply_markup=main_keyboard
         )
@@ -2498,7 +2508,7 @@ async def start_handler(
 
     await message.answer(
 
-        "Добро пожаловать в ЮРМАКС.\n\n"
+        "Добро пожаловать в ЮМАКС.\n\n"
         "Здесь можно сформировать "
         "профессиональный отчёт осмотра автомобиля.",
 
@@ -2951,12 +2961,34 @@ async def wheel_radius_handler(
         wheel_radius=value
     )
 
-    await state.set_state(InspectionForm.seat_material)
+    await state.set_state(InspectionForm.paint_type)
 
     await message.answer(
-        "Введите материал сидений.\\n\\n"
-        "Например: Кожа / Алькантара / Ткань / Кожа+алькантара"
+        "Введите тип лакокрасочного покрытия.\\n\\n"
+        "Например: Металлик / Перламутр / Обычное покрытие"
     )
+
+
+@dp.message(InspectionForm.paint_type)
+async def paint_type_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите тип лакокрасочного покрытия.")
+        return
+    await state.update_data(paint_type=value)
+    await state.set_state(InspectionForm.display_size)
+    await message.answer("Введите размер дисплея.\\n\\nНапример: 10.25 дюйма")
+
+
+@dp.message(InspectionForm.display_size)
+async def display_size_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите размер дисплея.")
+        return
+    await state.update_data(display_size=value)
+    await state.set_state(InspectionForm.seat_material)
+    await message.answer("Введите материал сидений.\\n\\nНапример: Кожа / Алькантара / Ткань / Кожа+алькантара")
 
 
 # =========================================================
@@ -3434,6 +3466,8 @@ async def finish_photos_handler(
                 ],
 
                 wheel_radius=data["wheel_radius"],
+                paint_type=data["paint_type"],
+                display_size=data["display_size"],
                 seat_material=data["seat_material"],
                 wheel_type=data["wheel_type"],
                 interior_color=data["interior_color"],

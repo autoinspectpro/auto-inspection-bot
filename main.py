@@ -58,6 +58,7 @@ class InspectionForm(StatesGroup):
 
     # Master
     master_name = State()
+    report_date = State()
 
     # Car
     make = State()
@@ -436,8 +437,6 @@ def make_lkp_map(measurements):
         font=subtitle_font,
         fill=(70, 190, 130)
     )
-
-    # Car
 
     car_x1 = 560
     car_x2 = 1040
@@ -901,6 +900,7 @@ def create_pdf(
     car_data,
     measurements,
     master_name,
+    report_date,
     photo_paths=None
 ):
 
@@ -998,8 +998,6 @@ def create_pdf(
         )
     )
 
-    # Main information card
-
     info_data = [
         ["МАРКА", car_data["make"]],
         ["МОДЕЛЬ", car_data["model"]],
@@ -1086,11 +1084,9 @@ def create_pdf(
         Spacer(1, 12 * mm)
     )
 
-    date_now = datetime.now().strftime("%d.%m.%Y")
-
     report_info = Table(
         [
-            ["Дата осмотра", date_now],
+            ["Дата формирования отчёта", report_date],
             ["Мастер осмотра", master_name],
         ],
         colWidths=[
@@ -1457,7 +1453,6 @@ def create_pdf(
                     ])
                 )
 
-                # Two columns
                 if index % 2 == 0:
 
                     if index + 1 < len(photo_paths):
@@ -1553,11 +1548,13 @@ def create_pdf(
                             )
 
                             story.append(row)
+
                             story.append(
                                 Spacer(1, 5 * mm)
                             )
 
                         except Exception as e:
+
                             print(
                                 "PHOTO ERROR:",
                                 repr(e)
@@ -1623,7 +1620,7 @@ def create_pdf(
 
     story.append(
         Paragraph(
-            f"Дата формирования отчёта: {date_now}",
+            f"Дата формирования отчёта: {report_date}",
             normal_style
         )
     )
@@ -1691,8 +1688,67 @@ async def master_handler(
     state: FSMContext
 ):
 
+    master_name = message.text.strip()
+
+    if not master_name:
+
+        await message.answer(
+            "Введите имя мастера."
+        )
+
+        return
+
     await state.update_data(
-        master_name=message.text.strip()
+        master_name=master_name
+    )
+
+    await state.set_state(
+        InspectionForm.report_date
+    )
+
+    await message.answer(
+        "Введите дату формирования отчёта.\n\n"
+        "Формат: ДД.ММ.ГГГГ\n"
+        "Например: 20.09.2026"
+    )
+
+
+# =========================================================
+# REPORT DATE
+# =========================================================
+
+@dp.message(InspectionForm.report_date)
+async def report_date_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = message.text.strip()
+
+    try:
+
+        parsed_date = datetime.strptime(
+            value,
+            "%d.%m.%Y"
+        )
+
+        report_date = parsed_date.strftime(
+            "%d.%m.%Y"
+        )
+
+    except ValueError:
+
+        await message.answer(
+            "Неверный формат даты.\n\n"
+            "Введите дату в формате:\n"
+            "ДД.ММ.ГГГГ\n\n"
+            "Например: 20.09.2026"
+        )
+
+        return
+
+    await state.update_data(
+        report_date=report_date
     )
 
     await state.set_state(
@@ -1905,6 +1961,7 @@ async def engine_volume_handler(
 
     try:
         float(value)
+
     except ValueError:
 
         await message.answer(
@@ -2153,8 +2210,6 @@ async def finish_photos_handler(
 
     try:
 
-        # Download Telegram photos
-
         for number, file_id in enumerate(
             photo_ids,
             start=1
@@ -2191,6 +2246,7 @@ async def finish_photos_handler(
             car_data=car_data,
             measurements=data["measurements"],
             master_name=data["master_name"],
+            report_date=data["report_date"],
             photo_paths=photo_paths
         )
 
@@ -2224,8 +2280,10 @@ async def finish_photos_handler(
         for path in photo_paths:
 
             try:
+
                 if os.path.exists(path):
                     os.remove(path)
+
             except Exception:
                 pass
 

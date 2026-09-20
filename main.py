@@ -1,7 +1,5 @@
 import os
 import asyncio
-import base64
-import json
 from io import BytesIO
 from datetime import datetime
 
@@ -20,8 +18,6 @@ from aiogram.types import (
 )
 
 from PIL import Image, ImageDraw, ImageFont
-
-from openai import AsyncOpenAI
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -48,31 +44,17 @@ from reportlab.pdfbase.ttfonts import TTFont
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-OPENAI_MODEL = os.getenv(
-    "OPENAI_VISION_MODEL",
-    "gpt-5.6-luna"
-)
-
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is not set")
-
 
 # =========================================================
-# BOT / OPENAI
+# BOT
 # =========================================================
 
 bot = Bot(TOKEN)
 
 dp = Dispatcher()
-
-openai_client = AsyncOpenAI(
-    api_key=OPENAI_API_KEY
-)
 
 
 # =========================================================
@@ -90,6 +72,10 @@ class InspectionForm(StatesGroup):
     vin = State()
     mileage = State()
 
+    body_type = State()
+    body_color = State()
+    wheel_radius = State()
+
     engine_type = State()
     engine_volume = State()
     engine_hp = State()
@@ -98,11 +84,6 @@ class InspectionForm(StatesGroup):
     lkp = State()
 
     photos = State()
-
-    # -----------------------------------------------------
-    # Новый этап:
-    # ручное подтверждение комплектации после AI
-    # -----------------------------------------------------
 
     manual_equipment = State()
 
@@ -164,31 +145,29 @@ finish_photos_keyboard = ReplyKeyboardMarkup(
 
 
 # =========================================================
-# КЛАВИАТУРА РУЧНОЙ ПРОВЕРКИ
+# КЛАВИАТУРА РУЧНОЙ КОМПЛЕКТАЦИИ
 # =========================================================
 
 def manual_equipment_keyboard():
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
-
             [
                 InlineKeyboardButton(
                     text="Есть",
                     callback_data="eq_yes"
                 ),
-
                 InlineKeyboardButton(
                     text="Нет",
                     callback_data="eq_no"
                 ),
-
+            ],
+            [
                 InlineKeyboardButton(
                     text="Пропустить",
                     callback_data="eq_skip"
-                ),
+                )
             ]
-
         ]
     )
 
@@ -415,560 +394,85 @@ EQUIPMENT = {
 
 
 # =========================================================
-# СХЕМА ОТВЕТА AI
+# СОЗДАНИЕ ПОЛНОГО СПИСКА РУЧНОЙ ПРОВЕРКИ
 # =========================================================
 
-EQUIPMENT_AI_SCHEMA = {
-
-    "type": "object",
-
-    "additionalProperties": False,
-
-    "properties": {
-
-        "confirmed": {
-
-            "type": "array",
-
-            "items": {
-
-                "type": "object",
-
-                "additionalProperties": False,
-
-                "properties": {
-
-                    "category": {
-                        "type": "string"
-                    },
-
-                    "option": {
-                        "type": "string"
-                    },
-
-                    "value": {
-                        "type": "string"
-                    },
-
-                    "evidence": {
-                        "type": "string"
-                    }
-                },
-
-                "required": [
-                    "category",
-                    "option",
-                    "value",
-                    "evidence"
-                ]
-            }
-        }
-    },
-
-    "required": [
-        "confirmed"
-    ]
-}
-
-
-# =========================================================
-# ПОДГОТОВКА ФОТО ДЛЯ AI
-# =========================================================
-
-def prepare_ai_image(path):
-
-    img = Image.open(path)
-
-    img = img.convert("RGB")
-
-    max_size = 1600
-
-    img.thumbnail(
-        (max_size, max_size),
-        Image.Resampling.LANCZOS
-    )
-
-    output = BytesIO()
-
-    img.save(
-        output,
-        format="JPEG",
-        quality=82,
-        optimize=True
-    )
-
-    output.seek(0)
-
-    encoded = base64.b64encode(
-        output.read()
-    ).decode("utf-8")
-
-    return (
-        "data:image/jpeg;base64,"
-        + encoded
-    )
-
-
-# =========================================================
-# PROMPT AI
-# =========================================================
-
-def build_equipment_prompt(car_data):
-
-    equipment_lines = []
-
-    for category, options in EQUIPMENT.items():
-
-        equipment_lines.append(
-            f"\n{category}:"
-        )
-
-        for option in options:
-
-            equipment_lines.append(
-                f"- {option}"
-            )
-
-    equipment_text = "\n".join(
-        equipment_lines
-    )
-
-    return f"""
-Ты являешься модулем визуального анализа
-автомобиля для системы ЮРМАКС.
-
-Твоя задача — определить оборудование автомобиля
-по предоставленным фотографиям.
-
-Данные автомобиля:
-
-Марка: {car_data["make"]}
-Модель: {car_data["model"]}
-Год: {car_data["year"]}
-Тип двигателя: {car_data["engine_type"]}
-Объём: {car_data["engine_volume"]} л
-Коробка: {car_data["gearbox"]}
-
-ДОСТУПНЫЕ ПУНКТЫ:
-
-{equipment_text}
-
-ПРАВИЛА:
-
-1. Определяй только то, что действительно видно
-   на предоставленных фотографиях.
-
-2. Не угадывай комплектацию по марке,
-   модели или году.
-
-3. Не используй типичную комплектацию модели
-   как доказательство наличия оборудования.
-
-4. Если оборудование не видно — не возвращай его.
-
-5. Если оборудование можно только предположить —
-   не возвращай его.
-
-6. Если оборудование скрыто и визуально
-   подтвердить его невозможно — не возвращай его.
-
-7. Отсутствие оборудования на фотографии
-   не означает, что его нет.
-
-8. Для бинарных опций используй значение:
-   "Есть".
-
-9. Для описательных пунктов используй
-   конкретное визуальное значение.
-
-10. Не придумывай размеры, названия и цифры.
-
-11. Тип кузова можно определить визуально.
-
-12. Цвет кузова можно определить визуально.
-
-13. Материал сидений можно определить,
-    если он хорошо виден.
-
-14. Название аудиосистемы можно определить
-    только если оно явно видно.
-
-15. Размер дисплея можно указать только при наличии
-    явного визуального подтверждения.
-
-16. Системы безопасности нельзя считать
-    установленными только потому, что автомобиль
-    определённой марки или модели.
-
-17. Не возвращай одинаковые пункты несколько раз.
-
-18. evidence должно кратко описывать визуальный
-    признак, на основании которого сделан вывод.
-
-Верни только действительно подтверждённые пункты.
-"""
-
-
-# =========================================================
-# AI АНАЛИЗ ОДНОЙ ПАЧКИ
-# =========================================================
-
-async def analyze_equipment_batch(
-    image_data_urls,
-    car_data
-):
-
-    content = [
-
-        {
-            "type": "input_text",
-            "text": build_equipment_prompt(
-                car_data
-            )
-        }
-    ]
-
-
-    for image_url in image_data_urls:
-
-        content.append(
-
-            {
-                "type": "input_image",
-                "image_url": image_url
-            }
-        )
-
-
-    response = await openai_client.responses.create(
-
-        model=OPENAI_MODEL,
-
-        input=[
-
-            {
-                "role": "user",
-
-                "content": content
-            }
-        ],
-
-        text={
-
-            "format": {
-
-                "type": "json_schema",
-
-                "name":
-                    "yurmax_equipment_analysis",
-
-                "schema":
-                    EQUIPMENT_AI_SCHEMA,
-
-                "strict":
-                    True
-            }
-        }
-    )
-
-
-    text = response.output_text
-
-
-    if not text:
-
-        return {
-            "confirmed": []
-        }
-
-
-    return json.loads(text)
-
-
-# =========================================================
-# AI АНАЛИЗ ВСЕХ ФОТО
-# =========================================================
-
-async def analyze_equipment_from_photos(
-    photo_paths,
-    car_data,
-    progress_callback=None
-):
-
-    results = {}
-
-
-    for category, options in EQUIPMENT.items():
-
-        results[category] = {}
-
-
-        for option in options:
-
-            results[category][option] = {
-
-                "status":
-                    "Не определено",
-
-                "value":
-                    "—",
-
-                "evidence":
-                    ""
-            }
-
-
-    if not photo_paths:
-
-        return results
-
-
-    image_urls = []
-
-
-    for path in photo_paths:
-
-        try:
-
-            image_url = prepare_ai_image(
-                path
-            )
-
-            image_urls.append(
-                image_url
-            )
-
-        except Exception as e:
-
-            print(
-                "AI IMAGE PREP ERROR:",
-                repr(e)
-            )
-
-
-    if not image_urls:
-
-        return results
-
-
-    batch_size = 6
-
-    all_confirmed = []
-
-
-    for start in range(
-        0,
-        len(image_urls),
-        batch_size
-    ):
-
-        batch = image_urls[
-            start:start + batch_size
-        ]
-
-
-        if progress_callback:
-
-            await progress_callback(
-                min(
-                    start + len(batch),
-                    len(image_urls)
-                ),
-                len(image_urls)
-            )
-
-
-        try:
-
-            result = await analyze_equipment_batch(
-
-                batch,
-
-                car_data
-            )
-
-
-            confirmed = result.get(
-                "confirmed",
-                []
-            )
-
-
-            if isinstance(
-                confirmed,
-                list
-            ):
-
-                all_confirmed.extend(
-                    confirmed
-                )
-
-
-        except Exception as e:
-
-            print(
-                "OPENAI ANALYSIS ERROR:",
-                repr(e)
-            )
-
-            continue
-
-
-    valid_categories = set(
-        EQUIPMENT.keys()
-    )
-
-
-    valid_options = {
-
-        category: set(options)
-
-        for category, options
-        in EQUIPMENT.items()
-    }
-
-
-    for item in all_confirmed:
-
-        if not isinstance(
-            item,
-            dict
-        ):
-            continue
-
-
-        category = str(
-            item.get(
-                "category",
-                ""
-            )
-        ).strip()
-
-
-        option = str(
-            item.get(
-                "option",
-                ""
-            )
-        ).strip()
-
-
-        value = str(
-            item.get(
-                "value",
-                ""
-            )
-        ).strip()
-
-
-        evidence = str(
-            item.get(
-                "evidence",
-                ""
-            )
-        ).strip()
-
-
-        if category not in valid_categories:
-
-            continue
-
-
-        if option not in valid_options[
-            category
-        ]:
-
-            continue
-
-
-        if not value:
-
-            value = "Есть"
-
-
-        results[
-            category
-        ][
-            option
-        ] = {
-
-            "status":
-                "Определено",
-
-            "value":
-                value,
-
-            "evidence":
-                evidence
-        }
-
-
-    return results
-
-
-# =========================================================
-# СОЗДАНИЕ СПИСКА ДЛЯ РУЧНОЙ ПРОВЕРКИ
-# =========================================================
-
-def build_manual_equipment_queue(
-    equipment_results
-):
+def build_manual_equipment_queue():
 
     queue = []
 
+    direct_fields = {
+        "Тип кузова",
+        "Цвет кузова",
+        "Размер колёс",
+    }
 
     for category, options in EQUIPMENT.items():
 
-        category_results = equipment_results.get(
-            category,
-            {}
-        )
-
-
         for option in options:
 
-            result = category_results.get(
+            if option in direct_fields:
+                continue
 
-                option,
-
-                {
-                    "status":
-                        "Не определено",
-
-                    "value":
-                        "—"
-                }
-            )
-
-
-            status = result.get(
-                "status",
-                "Не определено"
-            )
-
-
-            # -------------------------------------------------
-            # В ручную проверку попадают только те пункты,
-            # которые AI не смог определить
-            # -------------------------------------------------
-
-            if status != "Определено":
-
-                queue.append({
-
-                    "category":
-                        category,
-
-                    "option":
-                        option
-                })
-
+            queue.append({
+                "category": category,
+                "option": option
+            })
 
     return queue
 
 
 # =========================================================
-# СЛЕДУЮЩИЙ РУЧНОЙ ВОПРОС
+# НАЧАЛЬНЫЕ РЕЗУЛЬТАТЫ КОМПЛЕКТАЦИИ
+# =========================================================
+
+def create_empty_equipment_results(
+    body_type,
+    body_color,
+    wheel_radius
+):
+
+    results = {}
+
+    for category, options in EQUIPMENT.items():
+
+        results[category] = {}
+
+        for option in options:
+
+            results[category][option] = {
+                "status": "Не заполнено",
+                "value": "—",
+                "evidence": ""
+            }
+
+    # -----------------------------------------------------
+    # Заполняем данные, которые пользователь вводил отдельно
+    # -----------------------------------------------------
+
+    results["ЭКСТЕРЬЕР"]["Тип кузова"] = {
+        "status": "Ручной ввод",
+        "value": body_type,
+        "evidence": ""
+    }
+
+    results["ЭКСТЕРЬЕР"]["Цвет кузова"] = {
+        "status": "Ручной ввод",
+        "value": body_color,
+        "evidence": ""
+    }
+
+    results["ЭКСТЕРЬЕР"]["Размер колёс"] = {
+        "status": "Ручной ввод",
+        "value": wheel_radius,
+        "evidence": ""
+    }
+
+    return results
+
+
+# =========================================================
+# СЛЕДУЮЩИЙ ВОПРОС КОМПЛЕКТАЦИИ
 # =========================================================
 
 async def ask_next_manual_equipment(
@@ -978,427 +482,81 @@ async def ask_next_manual_equipment(
 
     data = await state.get_data()
 
-
     queue = data.get(
         "manual_equipment_queue",
         []
     )
 
-
     index = data.get(
         "manual_equipment_index",
         0
     )
-
 
     if index >= len(queue):
 
         return False
 
-
     item = queue[index]
 
-
     category = item["category"]
-
     option = item["option"]
 
-
-    progress = (
-        f"{index + 1} из {len(queue)}"
-    )
-
-
-    await message.answer(
-
-        f"Проверка комплектации\n\n"
-        f"Раздел: {category}\n"
-        f"Опция: {option}\n\n"
-        f"В наличии эта опция?",
-        
-        reply_markup=manual_equipment_keyboard()
-    )
-
-
     await state.update_data(
-
         manual_current_category=category,
-
         manual_current_option=option
     )
 
+    await message.answer(
+
+        f"ПРОВЕРКА КОМПЛЕКТАЦИИ\n\n"
+        f"Раздел: {category}\n"
+        f"Опция: {option}\n\n"
+        f"Укажите результат:",
+
+        reply_markup=manual_equipment_keyboard()
+    )
 
     return True
 
 
 # =========================================================
-# ЗАВЕРШЕНИЕ РУЧНОЙ ПРОВЕРКИ
-# =========================================================
-
-async def finish_manual_equipment(
-    message,
-    state
-):
-
-    data = await state.get_data()
-
-
-    car_data = {
-
-        "make":
-            data["make"],
-
-        "model":
-            data["model"],
-
-        "year":
-            data["year"],
-
-        "vin":
-            data["vin"],
-
-        "mileage":
-            data["mileage"],
-
-        "engine_type":
-            data["engine_type"],
-
-        "engine_volume":
-            data["engine_volume"],
-
-        "engine_hp":
-            data["engine_hp"],
-
-        "gearbox":
-            data["gearbox"],
-    }
-
-
-    equipment_results = data.get(
-        "equipment_results",
-        {}
-    )
-
-
-    photo_paths = data.get(
-        "photo_paths",
-        []
-    )
-
-
-    await message.answer(
-        "Все ответы по комплектации получены.\n\n"
-        "Формирую PDF-отчёт..."
-    )
-
-
-    try:
-
-        pdf = create_pdf(
-
-            car_data=car_data,
-
-            measurements=data[
-                "measurements"
-            ],
-
-            master_name=data[
-                "master_name"
-            ],
-
-            report_date=data[
-                "report_date"
-            ],
-
-            photo_paths=photo_paths,
-
-            equipment_results=equipment_results
-        )
-
-
-        await message.answer_document(
-
-            types.BufferedInputFile(
-
-                pdf.read(),
-
-                filename=
-                    "YURMAX_AKT_OSMOTRA.pdf"
-            )
-        )
-
-
-        await message.answer(
-
-            "Готово.\n\n"
-            "PDF-отчёт ЮРМАКС сформирован.",
-
-            reply_markup=main_keyboard
-        )
-
-
-    except Exception as e:
-
-        print(
-            "PDF ERROR:",
-            repr(e)
-        )
-
-
-        await message.answer(
-
-            "Произошла ошибка при формировании PDF.\n\n"
-            "Проверь логи Render."
-        )
-
-
-    finally:
-
-        for path in photo_paths:
-
-            try:
-
-                if os.path.exists(path):
-
-                    os.remove(path)
-
-            except Exception:
-
-                pass
-
-
-        await state.clear()
-
-
-# =========================================================
-# ОБРАБОТКА КНОПОК РУЧНОГО ВВОДА
-# =========================================================
-
-@dp.callback_query(
-    InspectionForm.manual_equipment,
-    F.data.in_([
-        "eq_yes",
-        "eq_no",
-        "eq_skip"
-    ])
-)
-async def manual_equipment_callback(
-    callback: CallbackQuery,
-    state: FSMContext
-):
-
-    data = await state.get_data()
-
-
-    equipment_results = data.get(
-        "equipment_results",
-        {}
-    )
-
-
-    category = data.get(
-        "manual_current_category"
-    )
-
-
-    option = data.get(
-        "manual_current_option"
-    )
-
-
-    if not category or not option:
-
-        await callback.answer(
-            "Ошибка состояния. Начните новый акт.",
-            show_alert=True
-        )
-
-        return
-
-
-    # -----------------------------------------------------
-    # Определяем ответ
-    # -----------------------------------------------------
-
-    if callback.data == "eq_yes":
-
-        value = "Есть"
-
-    elif callback.data == "eq_no":
-
-        value = "Нет"
-
-    else:
-
-        value = "—"
-
-
-    # -----------------------------------------------------
-    # Сохраняем ручной результат
-    # -----------------------------------------------------
-
-    equipment_results[category][option] = {
-
-        "status":
-            "Ручной ввод",
-
-        "value":
-            value,
-
-        "evidence":
-            ""
-    }
-
-
-    index = data.get(
-        "manual_equipment_index",
-        0
-    )
-
-
-    queue = data.get(
-        "manual_equipment_queue",
-        []
-    )
-
-
-    next_index = index + 1
-
-
-    await state.update_data(
-
-        equipment_results=
-            equipment_results,
-
-        manual_equipment_index=
-            next_index
-    )
-
-
-    # -----------------------------------------------------
-    # Убираем старую клавиатуру
-    # -----------------------------------------------------
-
-    try:
-
-        await callback.message.edit_reply_markup(
-            reply_markup=None
-        )
-
-    except Exception:
-
-        pass
-
-
-    await callback.answer()
-
-
-    # -----------------------------------------------------
-    # Следующий вопрос
-    # -----------------------------------------------------
-
-    if next_index < len(queue):
-
-        item = queue[next_index]
-
-
-        next_category = item[
-            "category"
-        ]
-
-        next_option = item[
-            "option"
-        ]
-
-
-        await state.update_data(
-
-            manual_current_category=
-                next_category,
-
-            manual_current_option=
-                next_option
-        )
-
-
-        await callback.message.answer(
-
-            f"Проверка комплектации\n\n"
-            f"Раздел: {next_category}\n"
-            f"Опция: {next_option}\n\n"
-            f"В наличии эта опция?",
-
-            reply_markup=
-                manual_equipment_keyboard()
-        )
-
-
-        return
-
-
-    # -----------------------------------------------------
-    # Всё закончено
-    # -----------------------------------------------------
-
-    await finish_manual_equipment(
-
-        callback.message,
-
-        state
-    )
-
-
-# =========================================================
-# ШРИФТЫ
+# РЕГИСТРАЦИЯ ШРИФТОВ
 # =========================================================
 
 def register_fonts():
 
     regular_candidates = [
-
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     ]
 
-
     bold_candidates = [
-
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-
         "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
     ]
 
-
     regular = None
-
     bold = None
-
 
     for path in regular_candidates:
 
         if os.path.exists(path):
 
             regular = path
-
             break
-
 
     for path in bold_candidates:
 
         if os.path.exists(path):
 
             bold = path
-
             break
-
 
     if not regular or not bold:
 
         raise RuntimeError(
             "DejaVu fonts not found"
         )
-
 
     pdfmetrics.registerFont(
         TTFont(
@@ -1407,14 +565,12 @@ def register_fonts():
         )
     )
 
-
     pdfmetrics.registerFont(
         TTFont(
             "DejaVuBold",
             bold
         )
     )
-
 
     return regular, bold
 
@@ -1427,12 +583,7 @@ def get_pil_font(
     bold=False
 ):
 
-    path = (
-        BOLD_FONT
-        if bold
-        else REGULAR_FONT
-    )
-
+    path = BOLD_FONT if bold else REGULAR_FONT
 
     return ImageFont.truetype(
         path,
@@ -1456,54 +607,31 @@ def draw_arrow(
         width=5
     )
 
-
     x1, y1 = start
-
     x2, y2 = end
 
-
     dx = x2 - x1
-
     dy = y2 - y1
-
 
     length = max(
         (dx * dx + dy * dy) ** 0.5,
         1
     )
 
-
     ux = dx / length
-
     uy = dy / length
-
 
     size = 18
 
-
     left = (
-
-        x2
-        - ux * size
-        - uy * size * 0.6,
-
-        y2
-        - uy * size
-        + ux * size * 0.6
+        x2 - ux * size - uy * size * 0.6,
+        y2 - uy * size + ux * size * 0.6
     )
-
 
     right = (
-
-        x2
-        - ux * size
-        + uy * size * 0.6,
-
-        y2
-        - uy * size
-        - ux * size * 0.6
+        x2 - ux * size + uy * size * 0.6,
+        y2 - uy * size - ux * size * 0.6
     )
-
 
     draw.polygon(
         [
@@ -1524,9 +652,7 @@ def make_lkp_map(
 ):
 
     width = 1600
-
     height = 1350
-
 
     img = Image.new(
         "RGB",
@@ -1537,34 +663,26 @@ def make_lkp_map(
         (12, 15, 17)
     )
 
-
-    draw = ImageDraw.Draw(
-        img
-    )
-
+    draw = ImageDraw.Draw(img)
 
     title_font = get_pil_font(
         48,
         True
     )
 
-
     subtitle_font = get_pil_font(
         30
     )
-
 
     label_font = get_pil_font(
         25,
         True
     )
 
-
     value_font = get_pil_font(
         26,
         True
     )
-
 
     draw.text(
         (60, 45),
@@ -1573,7 +691,6 @@ def make_lkp_map(
         fill=(255, 255, 255)
     )
 
-
     draw.text(
         (60, 110),
         "ЮРМАКС",
@@ -1581,15 +698,10 @@ def make_lkp_map(
         fill=(70, 190, 130)
     )
 
-
     car_x1 = 560
-
     car_x2 = 1040
-
     car_y1 = 230
-
     car_y2 = 1100
-
 
     draw.rounded_rectangle(
         [
@@ -1604,7 +716,6 @@ def make_lkp_map(
         width=6
     )
 
-
     draw.rounded_rectangle(
         [
             615,
@@ -1617,7 +728,6 @@ def make_lkp_map(
         outline=(120, 125, 130),
         width=4
     )
-
 
     draw.rounded_rectangle(
         [
@@ -1632,7 +742,6 @@ def make_lkp_map(
         width=4
     )
 
-
     draw.polygon(
         [
             (650, 440),
@@ -1644,7 +753,6 @@ def make_lkp_map(
         outline=(100, 110, 115)
     )
 
-
     draw.polygon(
         [
             (685, 650),
@@ -1655,7 +763,6 @@ def make_lkp_map(
         fill=(28, 45, 52),
         outline=(100, 110, 115)
     )
-
 
     draw.rounded_rectangle(
         [
@@ -1670,7 +777,6 @@ def make_lkp_map(
         width=4
     )
 
-
     for y in [380, 875]:
 
         draw.rounded_rectangle(
@@ -1684,7 +790,6 @@ def make_lkp_map(
             fill=(8, 9, 10)
         )
 
-
         draw.rounded_rectangle(
             [
                 1010,
@@ -1696,7 +801,6 @@ def make_lkp_map(
             fill=(8, 9, 10)
         )
 
-
     draw.line(
         [
             (800, 250),
@@ -1706,7 +810,6 @@ def make_lkp_map(
         width=3
     )
 
-
     def label_box(
         x,
         y,
@@ -1715,9 +818,7 @@ def make_lkp_map(
     ):
 
         box_w = 390
-
         box_h = 92
-
 
         draw.rounded_rectangle(
             [
@@ -1732,7 +833,6 @@ def make_lkp_map(
             width=3
         )
 
-
         draw.text(
             (
                 x + 18,
@@ -1742,7 +842,6 @@ def make_lkp_map(
             font=label_font,
             fill=(245, 245, 245)
         )
-
 
         draw.text(
             (
@@ -1754,99 +853,81 @@ def make_lkp_map(
             fill=(70, 190, 130)
         )
 
-
     positions = {
 
-        "Капот":
-            (
-                60,
-                250,
-                (615, 360)
-            ),
+        "Капот": (
+            60,
+            250,
+            (615, 360)
+        ),
 
-        "Крыша":
-            (
-                60,
-                520,
-                (625, 600)
-            ),
+        "Крыша": (
+            60,
+            520,
+            (625, 600)
+        ),
 
-        "Крышка багажника":
-            (
-                60,
-                790,
-                (615, 930)
-            ),
+        "Крышка багажника": (
+            60,
+            790,
+            (615, 930)
+        ),
 
-        "Переднее левое крыло":
-            (
-                60,
-                1010,
-                (560, 450)
-            ),
+        "Переднее левое крыло": (
+            60,
+            1010,
+            (560, 450)
+        ),
 
-        "Передняя левая дверь":
-            (
-                60,
-                1120,
-                (625, 520)
-            ),
+        "Передняя левая дверь": (
+            60,
+            1120,
+            (625, 520)
+        ),
 
-        "Заднее левое крыло":
-            (
-                1140,
-                1010,
-                (1040, 950)
-            ),
+        "Заднее левое крыло": (
+            1140,
+            1010,
+            (1040, 950)
+        ),
 
-        "Задняя левая дверь":
-            (
-                1140,
-                900,
-                (975, 680)
-            ),
+        "Задняя левая дверь": (
+            1140,
+            900,
+            (975, 680)
+        ),
 
-        "Переднее правое крыло":
-            (
-                1140,
-                250,
-                (1040, 450)
-            ),
+        "Переднее правое крыло": (
+            1140,
+            250,
+            (1040, 450)
+        ),
 
-        "Передняя правая дверь":
-            (
-                1140,
-                520,
-                (975, 520)
-            ),
+        "Передняя правая дверь": (
+            1140,
+            520,
+            (975, 520)
+        ),
 
-        "Задняя правая дверь":
-            (
-                1140,
-                650,
-                (975, 700)
-            ),
+        "Задняя правая дверь": (
+            1140,
+            650,
+            (975, 700)
+        ),
 
-        "Заднее правое крыло":
-            (
-                1140,
-                790,
-                (1040, 930)
-            ),
+        "Заднее правое крыло": (
+            1140,
+            790,
+            (1040, 930)
+        ),
     }
-
 
     for part, value in measurements.items():
 
         if part not in positions:
-
             continue
 
-
-        x, y, target = positions[
-            part
-        ]
-
+        x, y, target = positions[part]
 
         label_box(
             x,
@@ -1854,7 +935,6 @@ def make_lkp_map(
             part,
             value
         )
-
 
         if x < width // 2:
 
@@ -1870,13 +950,11 @@ def make_lkp_map(
                 y + 46
             )
 
-
         draw_arrow(
             draw,
             start,
             target
         )
-
 
     draw.text(
         (60, 1270),
@@ -1885,18 +963,14 @@ def make_lkp_map(
         fill=(180, 185, 190)
     )
 
-
     output = BytesIO()
-
 
     img.save(
         output,
         format="PNG"
     )
 
-
     output.seek(0)
-
 
     return output
 
@@ -1912,14 +986,11 @@ def pdf_header_footer(
 
     canvas.saveState()
 
-
     width, height = A4
-
 
     canvas.setFillColor(
         colors.HexColor("#101416")
     )
-
 
     canvas.rect(
         0,
@@ -1930,17 +1001,14 @@ def pdf_header_footer(
         stroke=0
     )
 
-
     canvas.setFont(
         "DejaVuBold",
         15
     )
 
-
     canvas.setFillColor(
         colors.white
     )
-
 
     canvas.drawString(
         15 * mm,
@@ -1948,17 +1016,14 @@ def pdf_header_footer(
         "ЮРМАКС"
     )
 
-
     canvas.setFont(
         "DejaVu",
         8
     )
 
-
     canvas.setFillColor(
         colors.HexColor("#46BE82")
     )
-
 
     canvas.drawRightString(
         width - 15 * mm,
@@ -1966,17 +1031,14 @@ def pdf_header_footer(
         "АКТ ОСМОТРА АВТОМОБИЛЯ"
     )
 
-
     canvas.setFillColor(
         colors.HexColor("#777777")
     )
-
 
     canvas.setFont(
         "DejaVu",
         8
     )
-
 
     canvas.drawString(
         15 * mm,
@@ -1984,13 +1046,11 @@ def pdf_header_footer(
         "ЮРМАКС"
     )
 
-
     canvas.drawRightString(
         width - 15 * mm,
         10 * mm,
         f"Страница {doc.page}"
     )
-
 
     canvas.restoreState()
 
@@ -2013,7 +1073,6 @@ def make_equipment_table(
         textColor=colors.white,
     )
 
-
     body_style = ParagraphStyle(
         "EquipmentBody",
         fontName="DejaVu",
@@ -2022,24 +1081,21 @@ def make_equipment_table(
         textColor=colors.HexColor("#202426"),
     )
 
-
-    confirmed_style = ParagraphStyle(
-        "EquipmentConfirmed",
+    value_style = ParagraphStyle(
+        "EquipmentValue",
         fontName="DejaVuBold",
         fontSize=8,
         leading=10,
         textColor=colors.HexColor("#278553"),
     )
 
-
-    manual_style = ParagraphStyle(
-        "EquipmentManual",
+    no_style = ParagraphStyle(
+        "EquipmentNo",
         fontName="DejaVuBold",
         fontSize=8,
         leading=10,
-        textColor=colors.HexColor("#315F91"),
+        textColor=colors.HexColor("#A33A3A"),
     )
-
 
     unknown_style = ParagraphStyle(
         "EquipmentUnknown",
@@ -2049,15 +1105,12 @@ def make_equipment_table(
         textColor=colors.HexColor("#777777"),
     )
 
-
     data = [
-
         [
             Paragraph(
                 "ОПЦИЯ",
                 header_style
             ),
-
             Paragraph(
                 "РЕЗУЛЬТАТ",
                 header_style
@@ -2065,140 +1118,88 @@ def make_equipment_table(
         ]
     ]
 
-
     category_results = (
-
         equipment_results.get(
             category,
             {}
         )
-
         if equipment_results
-
         else {}
     )
-
 
     for option in options:
 
         result = category_results.get(
-
             option,
-
             {
-                "status":
-                    "Не определено",
-
-                "value":
-                    "—"
+                "status": "Не заполнено",
+                "value": "—"
             }
         )
 
-
         status = result.get(
             "status",
-            "Не определено"
+            "Не заполнено"
         )
-
 
         value = result.get(
             "value",
             "—"
         )
 
+        if status in [
+            "Ручной ввод",
+            "Заполнено"
+        ]:
 
-        # -------------------------------------------------
-        # AI определил
-        # -------------------------------------------------
-
-        if status == "Определено":
-
-            if not value:
-
-                value = "Есть"
-
-
-            result_paragraph = Paragraph(
-
-                value,
-
-                confirmed_style
-            )
-
-
-        # -------------------------------------------------
-        # Пользователь ответил вручную
-        # -------------------------------------------------
-
-        elif status == "Ручной ввод":
-
-            if not value:
-
-                value = "—"
-
-
-            if value == "—":
+            if value == "Нет":
 
                 result_paragraph = Paragraph(
+                    "Нет",
+                    no_style
+                )
 
+            elif value == "—":
+
+                result_paragraph = Paragraph(
                     "—",
-
                     unknown_style
                 )
 
             else:
 
                 result_paragraph = Paragraph(
-
-                    value,
-
-                    manual_style
+                    str(value),
+                    value_style
                 )
-
-
-        # -------------------------------------------------
-        # Ничего не определено
-        # -------------------------------------------------
 
         else:
 
             result_paragraph = Paragraph(
-
                 "—",
-
                 unknown_style
             )
 
-
         data.append(
-
             [
-
                 Paragraph(
                     option,
                     body_style
                 ),
-
                 result_paragraph
             ]
         )
 
-
     table = Table(
-
         data,
-
         colWidths=[
             105 * mm,
             65 * mm
         ],
-
         repeatRows=1
     )
 
-
     table.setStyle(
-
         TableStyle([
 
             (
@@ -2263,7 +1264,6 @@ def make_equipment_table(
         ])
     )
 
-
     return table
 
 
@@ -2311,24 +1311,18 @@ def signature_table(
         ]
     ]
 
-
     table = Table(
-
         data,
-
         colWidths=[
             85 * mm,
             85 * mm
         ],
-
         rowHeights=[
             35 * mm
         ]
     )
 
-
     table.setStyle(
-
         TableStyle([
 
             (
@@ -2370,7 +1364,6 @@ def signature_table(
         ])
     )
 
-
     return table
 
 
@@ -2388,17 +1381,12 @@ def create_pdf(
 ):
 
     if photo_paths is None:
-
         photo_paths = []
 
-
     if equipment_results is None:
-
         equipment_results = {}
 
-
     output = BytesIO()
-
 
     doc = SimpleDocTemplate(
 
@@ -2419,7 +1407,6 @@ def create_pdf(
         author="ЮРМАКС",
     )
 
-
     title_style = ParagraphStyle(
 
         "TitleCustom",
@@ -2436,7 +1423,6 @@ def create_pdf(
 
         spaceAfter=8,
     )
-
 
     subtitle_style = ParagraphStyle(
 
@@ -2455,7 +1441,6 @@ def create_pdf(
         spaceAfter=20,
     )
 
-
     section_style = ParagraphStyle(
 
         "SectionCustom",
@@ -2473,7 +1458,6 @@ def create_pdf(
         spaceAfter=10,
     )
 
-
     normal_style = ParagraphStyle(
 
         "NormalCustom",
@@ -2487,9 +1471,7 @@ def create_pdf(
         textColor=colors.HexColor("#25292B"),
     )
 
-
     story = []
-
 
     # =====================================================
     # ПЕРВАЯ СТРАНИЦА
@@ -2501,7 +1483,6 @@ def create_pdf(
             12 * mm
         )
     )
-
 
     story.append(
 
@@ -2520,7 +1501,6 @@ def create_pdf(
         )
     )
 
-
     story.append(
 
         Paragraph(
@@ -2529,7 +1509,6 @@ def create_pdf(
         )
     )
 
-
     story.append(
 
         Paragraph(
@@ -2537,7 +1516,6 @@ def create_pdf(
             subtitle_style
         )
     )
-
 
     info_data = [
 
@@ -2567,6 +1545,21 @@ def create_pdf(
         ],
 
         [
+            "ТИП КУЗОВА",
+            car_data["body_type"]
+        ],
+
+        [
+            "ЦВЕТ",
+            car_data["body_color"]
+        ],
+
+        [
+            "РАЗМЕР КОЛЁС",
+            car_data["wheel_radius"]
+        ],
+
+        [
             "ТИП ДВИГАТЕЛЯ",
             car_data["engine_type"]
         ],
@@ -2587,7 +1580,6 @@ def create_pdf(
         ],
     ]
 
-
     info_table = Table(
 
         info_data,
@@ -2597,7 +1589,6 @@ def create_pdf(
             108 * mm
         ]
     )
-
 
     info_table.setStyle(
 
@@ -2669,19 +1660,16 @@ def create_pdf(
         ])
     )
 
-
     story.append(
         info_table
     )
 
-
     story.append(
         Spacer(
             1,
-            12 * mm
+            10 * mm
         )
     )
-
 
     report_info = Table(
 
@@ -2704,7 +1692,6 @@ def create_pdf(
             108 * mm
         ]
     )
-
 
     report_info.setStyle(
 
@@ -2770,11 +1757,9 @@ def create_pdf(
         ])
     )
 
-
     story.append(
         report_info
     )
-
 
     story.append(
         Spacer(
@@ -2783,13 +1768,11 @@ def create_pdf(
         )
     )
 
-
     story.append(
         signature_table(
             master_name
         )
     )
-
 
     # =====================================================
     # ЛКП
@@ -2799,7 +1782,6 @@ def create_pdf(
         PageBreak()
     )
 
-
     story.append(
 
         Paragraph(
@@ -2808,11 +1790,9 @@ def create_pdf(
         )
     )
 
-
     lkp_image = make_lkp_map(
         measurements
     )
-
 
     story.append(
 
@@ -2823,14 +1803,12 @@ def create_pdf(
         )
     )
 
-
     story.append(
         Spacer(
             1,
             5 * mm
         )
     )
-
 
     story.append(
 
@@ -2840,7 +1818,6 @@ def create_pdf(
         )
     )
 
-
     # =====================================================
     # КОМПЛЕКТАЦИЯ
     # =====================================================
@@ -2848,7 +1825,6 @@ def create_pdf(
     story.append(
         PageBreak()
     )
-
 
     story.append(
 
@@ -2858,7 +1834,6 @@ def create_pdf(
         )
     )
 
-
     story.append(
 
         Paragraph(
@@ -2866,7 +1841,6 @@ def create_pdf(
             subtitle_style
         )
     )
-
 
     for category, options in EQUIPMENT.items():
 
@@ -2877,7 +1851,6 @@ def create_pdf(
                 section_style
             )
         )
-
 
         story.append(
 
@@ -2891,14 +1864,12 @@ def create_pdf(
             )
         )
 
-
         story.append(
             Spacer(
                 1,
                 7 * mm
             )
         )
-
 
     # =====================================================
     # ЭНДОСКОПИЯ
@@ -2914,7 +1885,6 @@ def create_pdf(
             PageBreak()
         )
 
-
         story.append(
 
             Paragraph(
@@ -2923,7 +1893,6 @@ def create_pdf(
             )
         )
 
-
         story.append(
 
             Paragraph(
@@ -2931,7 +1900,6 @@ def create_pdf(
                 subtitle_style
             )
         )
-
 
         endoscopy_data = [
 
@@ -2986,7 +1954,6 @@ def create_pdf(
             ],
         ]
 
-
         endoscopy_table = Table(
 
             endoscopy_data,
@@ -2996,7 +1963,6 @@ def create_pdf(
                 90 * mm
             ]
         )
-
 
         endoscopy_table.setStyle(
 
@@ -3068,11 +2034,9 @@ def create_pdf(
             ])
         )
 
-
         story.append(
             endoscopy_table
         )
-
 
     # =====================================================
     # ФОТО
@@ -3084,7 +2048,6 @@ def create_pdf(
             PageBreak()
         )
 
-
         story.append(
 
             Paragraph(
@@ -3092,7 +2055,6 @@ def create_pdf(
                 title_style
             )
         )
-
 
         story.append(
 
@@ -3102,17 +2064,148 @@ def create_pdf(
             )
         )
 
-
-        for index, photo_path in enumerate(
-            photo_paths
+        for index in range(
+            0,
+            len(photo_paths),
+            2
         ):
+
+            row_cells = []
+
+            for position in range(2):
+
+                photo_index = index + position
+
+                if photo_index >= len(photo_paths):
+
+                    break
+
+                photo_path = photo_paths[
+                    photo_index
+                ]
+
+                try:
+
+                    img = Image.open(
+                        photo_path
+                    )
+
+                    img.thumbnail(
+                        (760, 520)
+                    )
+
+                    temp = BytesIO()
+
+                    img.convert(
+                        "RGB"
+                    ).save(
+                        temp,
+                        format="JPEG",
+                        quality=90
+                    )
+
+                    temp.seek(0)
+
+                    rl_img = RLImage(
+                        temp,
+                        width=82 * mm,
+                        height=58 * mm
+                    )
+
+                    photo_cell = Table(
+                        [
+                            [
+                                rl_img
+                            ]
+                        ],
+                        colWidths=[
+                            85 * mm
+                        ],
+                        rowHeights=[
+                            62 * mm
+                        ]
+                    )
+
+                    photo_cell.setStyle(
+                        TableStyle([
+                            (
+                                "BOX",
+                                (0, 0),
+                                (-1, -1),
+                                0.5,
+                                colors.HexColor("#D4D8DA")
+                            ),
+
+                            (
+                                "VALIGN",
+                                (0, 0),
+                                (-1, -1),
+                                "MIDDLE"
+                            ),
+
+                            (
+                                "ALIGN",
+                                (0, 0),
+                                (-1, -1),
+                                "CENTER"
+                            ),
+                        ])
+                    )
+
+                    row_cells.append(
+                        photo_cell
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "PHOTO ERROR:",
+                        repr(e)
+                    )
+
+            if row_cells:
+
+                if len(row_cells) == 1:
+
+                    row_cells.append("")
+
+                row = Table(
+                    [
+                        row_cells
+                    ],
+                    colWidths=[
+                        88 * mm,
+                        88 * mm
+                    ]
+                )
+
+                row.setStyle(
+                    TableStyle([
+                        (
+                            "VALIGN",
+                            (0, 0),
+                            (-1, -1),
+                            "MIDDLE"
+                        )
+                    ])
+                )
+
+                story.append(
+                    row
+                )
+
+                story.append(
+                    Spacer(
+                        1,
+                        5 * mm
+                    )
+                )
 
             if index > 0 and index % 4 == 0:
 
                 story.append(
                     PageBreak()
                 )
-
 
                 story.append(
 
@@ -3122,264 +2215,6 @@ def create_pdf(
                     )
                 )
 
-
-            try:
-
-                img = Image.open(
-                    photo_path
-                )
-
-
-                img.thumbnail(
-                    (760, 520)
-                )
-
-
-                temp = BytesIO()
-
-
-                img.convert(
-                    "RGB"
-                ).save(
-
-                    temp,
-
-                    format="JPEG",
-
-                    quality=90
-                )
-
-
-                temp.seek(0)
-
-
-                rl_img = RLImage(
-
-                    temp,
-
-                    width=85 * mm,
-
-                    height=58 * mm
-                )
-
-
-                photo_cell = Table(
-
-                    [
-                        [
-                            rl_img
-                        ]
-                    ],
-
-                    colWidths=[
-                        85 * mm
-                    ],
-
-                    rowHeights=[
-                        62 * mm
-                    ]
-                )
-
-
-                photo_cell.setStyle(
-
-                    TableStyle([
-
-                        (
-                            "BOX",
-                            (0, 0),
-                            (-1, -1),
-                            0.5,
-                            colors.HexColor("#D4D8DA")
-                        ),
-
-                        (
-                            "VALIGN",
-                            (0, 0),
-                            (-1, -1),
-                            "MIDDLE"
-                        ),
-
-                        (
-                            "ALIGN",
-                            (0, 0),
-                            (-1, -1),
-                            "CENTER"
-                        ),
-                    ])
-                )
-
-
-                if index % 2 == 0:
-
-                    if index + 1 < len(
-                        photo_paths
-                    ):
-
-                        next_path = photo_paths[
-                            index + 1
-                        ]
-
-
-                        try:
-
-                            img2 = Image.open(
-                                next_path
-                            )
-
-
-                            img2.thumbnail(
-                                (760, 520)
-                            )
-
-
-                            temp2 = BytesIO()
-
-
-                            img2.convert(
-                                "RGB"
-                            ).save(
-
-                                temp2,
-
-                                format="JPEG",
-
-                                quality=90
-                            )
-
-
-                            temp2.seek(0)
-
-
-                            rl_img2 = RLImage(
-
-                                temp2,
-
-                                width=85 * mm,
-
-                                height=58 * mm
-                            )
-
-
-                            photo_cell2 = Table(
-
-                                [
-                                    [
-                                        rl_img2
-                                    ]
-                                ],
-
-                                colWidths=[
-                                    85 * mm
-                                ],
-
-                                rowHeights=[
-                                    62 * mm
-                                ]
-                            )
-
-
-                            photo_cell2.setStyle(
-
-                                TableStyle([
-
-                                    (
-                                        "BOX",
-                                        (0, 0),
-                                        (-1, -1),
-                                        0.5,
-                                        colors.HexColor("#D4D8DA")
-                                    ),
-
-                                    (
-                                        "VALIGN",
-                                        (0, 0),
-                                        (-1, -1),
-                                        "MIDDLE"
-                                    ),
-
-                                    (
-                                        "ALIGN",
-                                        (0, 0),
-                                        (-1, -1),
-                                        "CENTER"
-                                    ),
-                                ])
-                            )
-
-
-                            row = Table(
-
-                                [
-                                    [
-                                        photo_cell,
-                                        photo_cell2
-                                    ]
-                                ],
-
-                                colWidths=[
-                                    88 * mm,
-                                    88 * mm
-                                ]
-                            )
-
-
-                            row.setStyle(
-
-                                TableStyle([
-                                    (
-                                        "VALIGN",
-                                        (0, 0),
-                                        (-1, -1),
-                                        "MIDDLE"
-                                    )
-                                ])
-                            )
-
-
-                            story.append(
-                                row
-                            )
-
-
-                            story.append(
-                                Spacer(
-                                    1,
-                                    5 * mm
-                                )
-                            )
-
-
-                        except Exception as e:
-
-                            print(
-                                "PHOTO ERROR:",
-                                repr(e)
-                            )
-
-                    else:
-
-                        story.append(
-                            photo_cell
-                        )
-
-
-                        story.append(
-                            Spacer(
-                                1,
-                                5 * mm
-                            )
-                        )
-
-
-            except Exception as e:
-
-                print(
-                    "PHOTO ERROR:",
-                    repr(e)
-                )
-
-
     # =====================================================
     # ФИНАЛ
     # =====================================================
@@ -3387,7 +2222,6 @@ def create_pdf(
     story.append(
         PageBreak()
     )
-
 
     story.append(
 
@@ -3397,14 +2231,12 @@ def create_pdf(
         )
     )
 
-
     story.append(
         Spacer(
             1,
             8 * mm
         )
     )
-
 
     story.append(
 
@@ -3415,7 +2247,6 @@ def create_pdf(
         )
     )
 
-
     story.append(
         Spacer(
             1,
@@ -3423,13 +2254,11 @@ def create_pdf(
         )
     )
 
-
     story.append(
         signature_table(
             master_name
         )
     )
-
 
     story.append(
         Spacer(
@@ -3438,7 +2267,6 @@ def create_pdf(
         )
     )
 
-
     story.append(
 
         Paragraph(
@@ -3446,7 +2274,6 @@ def create_pdf(
             normal_style
         )
     )
-
 
     doc.build(
 
@@ -3457,11 +2284,152 @@ def create_pdf(
         onLaterPages=pdf_header_footer
     )
 
-
     output.seek(0)
 
-
     return output
+
+
+# =========================================================
+# УДАЛЕНИЕ ВРЕМЕННЫХ ФОТО
+# =========================================================
+
+def cleanup_photo_paths(
+    photo_paths
+):
+
+    for path in photo_paths:
+
+        try:
+
+            if os.path.exists(path):
+
+                os.remove(path)
+
+        except Exception:
+
+            pass
+
+
+# =========================================================
+# ФОРМИРОВАНИЕ И ОТПРАВКА PDF
+# =========================================================
+
+async def generate_and_send_report(
+    message,
+    state
+):
+
+    data = await state.get_data()
+
+    photo_paths = data.get(
+        "photo_paths",
+        []
+    )
+
+    try:
+
+        car_data = {
+
+            "make":
+                data["make"],
+
+            "model":
+                data["model"],
+
+            "year":
+                data["year"],
+
+            "vin":
+                data["vin"],
+
+            "mileage":
+                data["mileage"],
+
+            "body_type":
+                data["body_type"],
+
+            "body_color":
+                data["body_color"],
+
+            "wheel_radius":
+                data["wheel_radius"],
+
+            "engine_type":
+                data["engine_type"],
+
+            "engine_volume":
+                data["engine_volume"],
+
+            "engine_hp":
+                data["engine_hp"],
+
+            "gearbox":
+                data["gearbox"],
+        }
+
+        pdf = create_pdf(
+
+            car_data=car_data,
+
+            measurements=data[
+                "measurements"
+            ],
+
+            master_name=data[
+                "master_name"
+            ],
+
+            report_date=data[
+                "report_date"
+            ],
+
+            photo_paths=photo_paths,
+
+            equipment_results=data.get(
+                "equipment_results",
+                {}
+            )
+        )
+
+        await message.answer_document(
+
+            types.BufferedInputFile(
+
+                pdf.read(),
+
+                filename=
+                    "YURMAX_AKT_OSMOTRA.pdf"
+            )
+        )
+
+        await message.answer(
+
+            "Готово.\n\n"
+            "PDF-отчёт ЮРМАКС сформирован.",
+
+            reply_markup=main_keyboard
+        )
+
+    except Exception as e:
+
+        print(
+            "PDF ERROR:",
+            repr(e)
+        )
+
+        await message.answer(
+
+            "Произошла ошибка при формировании PDF.\n\n"
+            "Проверь логи Render."
+        )
+
+    finally:
+
+        cleanup_photo_paths(
+            photo_paths
+        )
+
+        await state.clear()
 
 
 # =========================================================
@@ -3477,7 +2445,6 @@ async def start_handler(
 ):
 
     await state.clear()
-
 
     await message.answer(
 
@@ -3503,11 +2470,9 @@ async def create_handler(
 
     await state.clear()
 
-
     await state.set_state(
         InspectionForm.master_name
     )
-
 
     await message.answer(
 
@@ -3528,8 +2493,9 @@ async def master_handler(
     state: FSMContext
 ):
 
-    master_name = message.text.strip()
-
+    master_name = (
+        message.text or ""
+    ).strip()
 
     if not master_name:
 
@@ -3539,16 +2505,13 @@ async def master_handler(
 
         return
 
-
     await state.update_data(
         master_name=master_name
     )
 
-
     await state.set_state(
         InspectionForm.report_date
     )
-
 
     await message.answer(
 
@@ -3570,8 +2533,9 @@ async def report_date_handler(
     state: FSMContext
 ):
 
-    value = message.text.strip()
-
+    value = (
+        message.text or ""
+    ).strip()
 
     try:
 
@@ -3580,11 +2544,9 @@ async def report_date_handler(
             "%d.%m.%Y"
         )
 
-
         report_date = parsed_date.strftime(
             "%d.%m.%Y"
         )
-
 
     except ValueError:
 
@@ -3598,16 +2560,13 @@ async def report_date_handler(
 
         return
 
-
     await state.update_data(
         report_date=report_date
     )
 
-
     await state.set_state(
         InspectionForm.make
     )
-
 
     await message.answer(
 
@@ -3628,15 +2587,25 @@ async def make_handler(
     state: FSMContext
 ):
 
-    await state.update_data(
-        make=message.text.strip()
-    )
+    value = (
+        message.text or ""
+    ).strip()
 
+    if not value:
+
+        await message.answer(
+            "Введите марку автомобиля."
+        )
+
+        return
+
+    await state.update_data(
+        make=value
+    )
 
     await state.set_state(
         InspectionForm.model
     )
-
 
     await message.answer(
 
@@ -3657,15 +2626,25 @@ async def model_handler(
     state: FSMContext
 ):
 
-    await state.update_data(
-        model=message.text.strip()
-    )
+    value = (
+        message.text or ""
+    ).strip()
 
+    if not value:
+
+        await message.answer(
+            "Введите модель автомобиля."
+        )
+
+        return
+
+    await state.update_data(
+        model=value
+    )
 
     await state.set_state(
         InspectionForm.year
     )
-
 
     await message.answer(
 
@@ -3686,8 +2665,9 @@ async def year_handler(
     state: FSMContext
 ):
 
-    value = message.text.strip()
-
+    value = (
+        message.text or ""
+    ).strip()
 
     if not value.isdigit():
 
@@ -3698,16 +2678,23 @@ async def year_handler(
 
         return
 
+    year = int(value)
+
+    if year < 1886 or year > 2100:
+
+        await message.answer(
+            "Введите корректный год."
+        )
+
+        return
 
     await state.update_data(
         year=value
     )
 
-
     await state.set_state(
         InspectionForm.vin
     )
-
 
     await message.answer(
         "Введите VIN автомобиля."
@@ -3726,15 +2713,25 @@ async def vin_handler(
     state: FSMContext
 ):
 
-    await state.update_data(
-        vin=message.text.strip()
-    )
+    value = (
+        message.text or ""
+    ).strip()
 
+    if not value:
+
+        await message.answer(
+            "Введите VIN автомобиля."
+        )
+
+        return
+
+    await state.update_data(
+        vin=value.upper()
+    )
 
     await state.set_state(
         InspectionForm.mileage
     )
-
 
     await message.answer(
 
@@ -3755,8 +2752,9 @@ async def mileage_handler(
     state: FSMContext
 ):
 
-    value = message.text.strip()
-
+    value = (
+        message.text or ""
+    ).strip()
 
     if not value.isdigit():
 
@@ -3768,16 +2766,144 @@ async def mileage_handler(
 
         return
 
-
     await state.update_data(
         mileage=value
     )
 
+    await state.set_state(
+        InspectionForm.body_type
+    )
+
+    await message.answer(
+
+        "Введите тип кузова.\n\n"
+        "Например:\n"
+        "Седан\n"
+        "Универсал\n"
+        "Хэтчбек\n"
+        "Кроссовер\n"
+        "Внедорожник\n"
+        "Купе\n"
+        "Кабриолет\n"
+        "Минивэн\n"
+        "Пикап"
+    )
+
+
+# =========================================================
+# ТИП КУЗОВА
+# =========================================================
+
+@dp.message(
+    InspectionForm.body_type
+)
+async def body_type_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
+    if not value:
+
+        await message.answer(
+            "Введите тип кузова."
+        )
+
+        return
+
+    await state.update_data(
+        body_type=value
+    )
+
+    await state.set_state(
+        InspectionForm.body_color
+    )
+
+    await message.answer(
+
+        "Введите цвет автомобиля.\n\n"
+        "Например: Чёрный металлик"
+    )
+
+
+# =========================================================
+# ЦВЕТ
+# =========================================================
+
+@dp.message(
+    InspectionForm.body_color
+)
+async def body_color_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
+    if not value:
+
+        await message.answer(
+            "Введите цвет автомобиля."
+        )
+
+        return
+
+    await state.update_data(
+        body_color=value
+    )
+
+    await state.set_state(
+        InspectionForm.wheel_radius
+    )
+
+    await message.answer(
+
+        "Введите радиус колёс.\n\n"
+        "Например: R18\n"
+        "или: 18"
+    )
+
+
+# =========================================================
+# РАДИУС КОЛЁС
+# =========================================================
+
+@dp.message(
+    InspectionForm.wheel_radius
+)
+async def wheel_radius_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip().upper()
+
+    if not value:
+
+        await message.answer(
+            "Введите радиус колёс."
+        )
+
+        return
+
+    if value.isdigit():
+
+        value = "R" + value
+
+    await state.update_data(
+        wheel_radius=value
+    )
 
     await state.set_state(
         InspectionForm.engine_type
     )
-
 
     await message.answer(
 
@@ -3807,9 +2933,9 @@ async def engine_type_handler(
         "Электро"
     ]
 
-
-    value = message.text.strip()
-
+    value = (
+        message.text or ""
+    ).strip()
 
     if value not in allowed:
 
@@ -3822,21 +2948,19 @@ async def engine_type_handler(
 
         return
 
-
     await state.update_data(
         engine_type=value
     )
-
 
     await state.set_state(
         InspectionForm.engine_volume
     )
 
-
     await message.answer(
 
         "Введите объём двигателя в литрах.\n\n"
-        "Например: 2.0"
+        "Например: 2.0\n\n"
+        "Для электро можно указать 0."
     )
 
 
@@ -3852,11 +2976,12 @@ async def engine_volume_handler(
     state: FSMContext
 ):
 
-    value = message.text.strip().replace(
+    value = (
+        message.text or ""
+    ).strip().replace(
         ",",
         "."
     )
-
 
     try:
 
@@ -3872,16 +2997,13 @@ async def engine_volume_handler(
 
         return
 
-
     await state.update_data(
         engine_volume=value
     )
 
-
     await state.set_state(
         InspectionForm.engine_hp
     )
-
 
     await message.answer(
 
@@ -3902,8 +3024,9 @@ async def engine_hp_handler(
     state: FSMContext
 ):
 
-    value = message.text.strip()
-
+    value = (
+        message.text or ""
+    ).strip()
 
     if not value.isdigit():
 
@@ -3915,16 +3038,13 @@ async def engine_hp_handler(
 
         return
 
-
     await state.update_data(
         engine_hp=value
     )
 
-
     await state.set_state(
         InspectionForm.gearbox
     )
-
 
     await message.answer(
 
@@ -3954,9 +3074,9 @@ async def gearbox_handler(
         "Вариатор"
     ]
 
-
-    value = message.text.strip()
-
+    value = (
+        message.text or ""
+    ).strip()
 
     if value not in allowed:
 
@@ -3969,11 +3089,9 @@ async def gearbox_handler(
 
         return
 
-
     await state.update_data(
         gearbox=value
     )
-
 
     await state.update_data(
 
@@ -3982,11 +3100,9 @@ async def gearbox_handler(
         measurements={}
     )
 
-
     await state.set_state(
         InspectionForm.lkp
     )
-
 
     await message.answer(
 
@@ -4008,8 +3124,9 @@ async def lkp_handler(
     state: FSMContext
 ):
 
-    value = message.text.strip()
-
+    value = (
+        message.text or ""
+    ).strip()
 
     if not value.isdigit():
 
@@ -4021,9 +3138,7 @@ async def lkp_handler(
 
         return
 
-
     measurement = int(value)
-
 
     if measurement < 1 or measurement > 5000:
 
@@ -4033,26 +3148,19 @@ async def lkp_handler(
 
         return
 
-
     data = await state.get_data()
-
 
     index = data["lkp_index"]
 
-
     measurements = data["measurements"]
 
-
     current_part = LKP_PARTS[index]
-
 
     measurements[
         current_part
     ] = measurement
 
-
     next_index = index + 1
-
 
     if next_index < len(
         LKP_PARTS
@@ -4065,7 +3173,6 @@ async def lkp_handler(
             measurements=measurements
         )
 
-
         await message.answer(
 
             f"Принято: {current_part} — "
@@ -4074,9 +3181,11 @@ async def lkp_handler(
             f"{LKP_PARTS[next_index]}"
         )
 
-
         return
 
+    # -----------------------------------------------------
+    # После ЛКП
+    # -----------------------------------------------------
 
     await state.update_data(
 
@@ -4085,11 +3194,9 @@ async def lkp_handler(
         photos=[]
     )
 
-
     await state.set_state(
         InspectionForm.photos
     )
-
 
     await message.answer(
 
@@ -4117,25 +3224,20 @@ async def photo_handler(
 
     data = await state.get_data()
 
-
     photos = data.get(
         "photos",
         []
     )
 
-
     largest = message.photo[-1]
-
 
     photos.append(
         largest.file_id
     )
 
-
     await state.update_data(
         photos=photos
     )
-
 
     await message.answer(
 
@@ -4159,12 +3261,10 @@ async def finish_photos_handler(
 
     data = await state.get_data()
 
-
     photo_ids = data.get(
         "photos",
         []
     )
-
 
     if not photo_ids:
 
@@ -4177,27 +3277,22 @@ async def finish_photos_handler(
 
         return
 
-
     await message.answer(
 
         f"Получено фотографий: {len(photo_ids)}.\n\n"
-        "Загружаю фотографии и формирую анализ..."
+        "Загружаю фотографии..."
     )
 
-
     photo_paths = []
-
 
     try:
 
         # -------------------------------------------------
-        # Скачиваем фото
+        # Скачиваем фотографии
         # -------------------------------------------------
 
         for number, file_id in enumerate(
-
             photo_ids,
-
             start=1
         ):
 
@@ -4205,107 +3300,51 @@ async def finish_photos_handler(
                 file_id
             )
 
-
             path = (
-
                 f"/tmp/"
                 f"yurmax_photo_{number}.jpg"
             )
 
-
             await bot.download_file(
-
                 file.file_path,
-
                 path
             )
-
 
             photo_paths.append(
                 path
             )
 
-
         # -------------------------------------------------
-        # Данные автомобиля
+        # Создаём пустую комплектацию
         # -------------------------------------------------
-
-        car_data = {
-
-            "make":
-                data["make"],
-
-            "model":
-                data["model"],
-
-            "year":
-                data["year"],
-
-            "vin":
-                data["vin"],
-
-            "mileage":
-                data["mileage"],
-
-            "engine_type":
-                data["engine_type"],
-
-            "engine_volume":
-                data["engine_volume"],
-
-            "engine_hp":
-                data["engine_hp"],
-
-            "gearbox":
-                data["gearbox"],
-        }
-
-
-        # -------------------------------------------------
-        # AI
-        # -------------------------------------------------
-
-        await message.answer(
-
-            "Анализирую комплектацию по фотографиям..."
-        )
-
-
-        async def ai_progress(
-            current,
-            total
-        ):
-
-            print(
-                f"AI PHOTO BATCH: "
-                f"{current}/{total}"
-            )
-
 
         equipment_results = (
+            create_empty_equipment_results(
 
-            await analyze_equipment_from_photos(
+                body_type=data[
+                    "body_type"
+                ],
 
-                photo_paths,
+                body_color=data[
+                    "body_color"
+                ],
 
-                car_data,
-
-                progress_callback=ai_progress
+                wheel_radius=data[
+                    "wheel_radius"
+                ]
             )
         )
 
-
         # -------------------------------------------------
-        # Список неопределённых пунктов
+        # Все остальные пункты идут вручную
         # -------------------------------------------------
 
-        manual_queue = build_manual_equipment_queue(
-            equipment_results
+        manual_queue = (
+            build_manual_equipment_queue()
         )
 
-
         # -------------------------------------------------
-        # Сохраняем всё в FSM
+        # Сохраняем всё
         # -------------------------------------------------
 
         await state.update_data(
@@ -4323,133 +3362,243 @@ async def finish_photos_handler(
                 photo_paths
         )
 
-
-        # -------------------------------------------------
-        # Если AI определил абсолютно всё
-        # -------------------------------------------------
-
-        if not manual_queue:
-
-            await message.answer(
-                "Комплектация определена.\n\n"
-                "Формирую PDF-отчёт..."
-            )
-
-
-            pdf = create_pdf(
-
-                car_data=car_data,
-
-                measurements=data[
-                    "measurements"
-                ],
-
-                master_name=data[
-                    "master_name"
-                ],
-
-                report_date=data[
-                    "report_date"
-                ],
-
-                photo_paths=photo_paths,
-
-                equipment_results=
-                    equipment_results
-            )
-
-
-            await message.answer_document(
-
-                types.BufferedInputFile(
-
-                    pdf.read(),
-
-                    filename=
-                        "YURMAX_AKT_OSMOTRA.pdf"
-                )
-            )
-
-
-            await message.answer(
-
-                "Готово.\n\n"
-                "PDF-отчёт ЮРМАКС сформирован.",
-
-                reply_markup=main_keyboard
-            )
-
-
-            for path in photo_paths:
-
-                try:
-
-                    if os.path.exists(path):
-
-                        os.remove(path)
-
-                except Exception:
-
-                    pass
-
-
-            await state.clear()
-
-            return
-
-
-        # -------------------------------------------------
-        # Есть неопределённые пункты
-        # -------------------------------------------------
-
         await message.answer(
 
-            "AI не смог определить часть оборудования.\n\n"
-            "Теперь я покажу только неопределённые пункты.\n"
-            "Для каждого выбери «Есть», «Нет» или «Пропустить»."
+            "Фотографии загружены.\n\n"
+            "Теперь заполним комплектацию вручную.\n"
+            "Для каждого пункта выберите:\n"
+            "Есть / Нет / Пропустить."
         )
-
 
         await state.set_state(
             InspectionForm.manual_equipment
         )
-
 
         await ask_next_manual_equipment(
             message,
             state
         )
 
-
     except Exception as e:
 
         print(
-            "REPORT ERROR:",
+            "PHOTO / REPORT ERROR:",
             repr(e)
         )
 
+        cleanup_photo_paths(
+            photo_paths
+        )
+
+        await state.clear()
 
         await message.answer(
 
-            "Произошла ошибка при формировании отчёта.\n\n"
+            "Произошла ошибка при загрузке фотографий.\n\n"
             "Проверь логи Render."
         )
 
 
-        for path in photo_paths:
+# =========================================================
+# РУЧНАЯ КОМПЛЕКТАЦИЯ
+# =========================================================
 
-            try:
+@dp.callback_query(
+    InspectionForm.manual_equipment,
+    F.data.in_([
+        "eq_yes",
+        "eq_no",
+        "eq_skip"
+    ])
+)
+async def manual_equipment_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
 
-                if os.path.exists(path):
+    data = await state.get_data()
 
-                    os.remove(path)
+    equipment_results = data.get(
+        "equipment_results",
+        {}
+    )
 
-            except Exception:
+    category = data.get(
+        "manual_current_category"
+    )
 
-                pass
+    option = data.get(
+        "manual_current_option"
+    )
+
+    queue = data.get(
+        "manual_equipment_queue",
+        []
+    )
+
+    index = data.get(
+        "manual_equipment_index",
+        0
+    )
+
+    if (
+        not category
+        or not option
+        or index >= len(queue)
+    ):
+
+        await callback.answer(
+            "Проверка уже завершена.",
+            show_alert=True
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # Ответ пользователя
+    # -----------------------------------------------------
+
+    if callback.data == "eq_yes":
+
+        value = "Есть"
+
+    elif callback.data == "eq_no":
+
+        value = "Нет"
+
+    else:
+
+        value = "—"
+
+    # -----------------------------------------------------
+    # Сохраняем
+    # -----------------------------------------------------
+
+    if category not in equipment_results:
+
+        equipment_results[category] = {}
+
+    equipment_results[
+        category
+    ][
+        option
+    ] = {
+
+        "status":
+            "Ручной ввод",
+
+        "value":
+            value,
+
+        "evidence":
+            ""
+    }
+
+    next_index = index + 1
+
+    await state.update_data(
+
+        equipment_results=
+            equipment_results,
+
+        manual_equipment_index=
+            next_index
+    )
+
+    await callback.answer()
+
+    # -----------------------------------------------------
+    # Если ещё есть вопросы
+    # -----------------------------------------------------
+
+    if next_index < len(queue):
+
+        next_item = queue[
+            next_index
+        ]
+
+        next_category = next_item[
+            "category"
+        ]
+
+        next_option = next_item[
+            "option"
+        ]
+
+        await state.update_data(
+
+            manual_current_category=
+                next_category,
+
+            manual_current_option=
+                next_option
+        )
+
+        try:
+
+            await callback.message.edit_reply_markup(
+                reply_markup=None
+            )
+
+        except Exception:
+
+            pass
+
+        await callback.message.answer(
+
+            f"ПРОВЕРКА КОМПЛЕКТАЦИИ\n\n"
+            f"Раздел: {next_category}\n"
+            f"Опция: {next_option}\n\n"
+            f"Укажите результат:",
+
+            reply_markup=
+                manual_equipment_keyboard()
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # Все пункты закончены
+    # -----------------------------------------------------
+
+    try:
+
+        await callback.message.edit_reply_markup(
+            reply_markup=None
+        )
+
+    except Exception:
+
+        pass
+
+    await callback.message.answer(
+
+        "Комплектация полностью заполнена.\n\n"
+        "Формирую PDF-отчёт..."
+    )
+
+    await generate_and_send_report(
+        callback.message,
+        state
+    )
 
 
-        await state.clear()
+# =========================================================
+# ЕСЛИ ПРИ РУЧНОЙ ПРОВЕРКЕ ПРИШЁЛ ТЕКСТ
+# =========================================================
+
+@dp.message(
+    InspectionForm.manual_equipment
+)
+async def manual_equipment_text_handler(
+    message: types.Message
+):
+
+    await message.answer(
+
+        "Используй кнопки под текущим пунктом:\n\n"
+        "Есть / Нет / Пропустить."
+    )
 
 
 # =========================================================
@@ -4488,20 +3637,16 @@ async def start_web_server():
 
     app = web.Application()
 
-
     app.router.add_get(
         "/",
         health
     )
 
-
     runner = web.AppRunner(
         app
     )
 
-
     await runner.setup()
-
 
     site = web.TCPSite(
 
@@ -4512,9 +3657,7 @@ async def start_web_server():
         PORT
     )
 
-
     await site.start()
-
 
     print(
         f"Web server started on port {PORT}"
@@ -4529,16 +3672,13 @@ async def main():
 
     await start_web_server()
 
-
     print(
         "YURMAX BOT STARTED"
     )
 
-
     print(
-        f"OPENAI MODEL: {OPENAI_MODEL}"
+        "MODE: MANUAL INSPECTION"
     )
-
 
     await dp.start_polling(
         bot

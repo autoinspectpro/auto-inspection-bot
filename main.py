@@ -76,6 +76,13 @@ class InspectionForm(StatesGroup):
     body_color = State()
     wheel_radius = State()
 
+    seat_material = State()
+    wheel_type = State()
+    interior_color = State()
+    seat_count = State()
+    audio_system_name = State()
+    speaker_count = State()
+
     engine_type = State()
     engine_volume = State()
     engine_hp = State()
@@ -405,6 +412,12 @@ def build_manual_equipment_queue():
         "Тип кузова",
         "Цвет кузова",
         "Размер колёс",
+        "Тип дисков",
+        "Материал сидений",
+        "Цвет салона",
+        "Количество мест",
+        "Название аудиосистемы",
+        "Количество динамиков",
     }
 
     for category, options in EQUIPMENT.items():
@@ -429,7 +442,13 @@ def build_manual_equipment_queue():
 def create_empty_equipment_results(
     body_type,
     body_color,
-    wheel_radius
+    wheel_radius,
+    seat_material,
+    wheel_type,
+    interior_color,
+    seat_count,
+    audio_system_name,
+    speaker_count
 ):
 
     results = {}
@@ -463,6 +482,22 @@ def create_empty_equipment_results(
         "value": wheel_radius,
         "evidence": ""
     }
+
+    direct_values = {
+        ("ЭКСТЕРЬЕР", "Тип дисков"): wheel_type,
+        ("ИНТЕРЬЕР", "Материал сидений"): seat_material,
+        ("ИНТЕРЬЕР", "Цвет салона"): interior_color,
+        ("ИНТЕРЬЕР", "Количество мест"): seat_count,
+        ("МУЛЬТИМЕДИА", "Название аудиосистемы"): audio_system_name,
+        ("МУЛЬТИМЕДИА", "Количество динамиков"): speaker_count,
+    }
+
+    for (category, option), value in direct_values.items():
+        results[category][option] = {
+            "status": "Ручной ввод",
+            "value": value,
+            "evidence": ""
+        }
 
     return results
 
@@ -2897,16 +2932,82 @@ async def wheel_radius_handler(
         wheel_radius=value
     )
 
-    await state.set_state(
-        InspectionForm.engine_type
-    )
+    await state.set_state(InspectionForm.seat_material)
 
     await message.answer(
-
-        "Выберите тип двигателя.",
-
-        reply_markup=engine_keyboard
+        "Введите материал сидений.\\n\\n"
+        "Например: Кожа / Алькантара / Ткань / Кожа+алькантара"
     )
+
+
+# =========================================================
+# ДОПОЛНИТЕЛЬНЫЕ ПОЛЯ КОМПЛЕКТАЦИИ
+# =========================================================
+
+@dp.message(InspectionForm.seat_material)
+async def seat_material_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите материал сидений.")
+        return
+    await state.update_data(seat_material=value)
+    await state.set_state(InspectionForm.wheel_type)
+    await message.answer("Введите тип дисков.\\n\\nНапример: Легкосплавные / Штампованные / Кованые")
+
+
+@dp.message(InspectionForm.wheel_type)
+async def wheel_type_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите тип дисков.")
+        return
+    await state.update_data(wheel_type=value)
+    await state.set_state(InspectionForm.interior_color)
+    await message.answer("Введите цвет салона.\\n\\nНапример: Чёрный")
+
+
+@dp.message(InspectionForm.interior_color)
+async def interior_color_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите цвет салона.")
+        return
+    await state.update_data(interior_color=value)
+    await state.set_state(InspectionForm.seat_count)
+    await message.answer("Введите количество мест.\\n\\nНапример: 5")
+
+
+@dp.message(InspectionForm.seat_count)
+async def seat_count_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value.isdigit() or not 1 <= int(value) <= 20:
+        await message.answer("Введите количество мест цифрами от 1 до 20.")
+        return
+    await state.update_data(seat_count=value)
+    await state.set_state(InspectionForm.audio_system_name)
+    await message.answer("Введите название аудиосистемы.\\n\\nНапример: Harman Kardon")
+
+
+@dp.message(InspectionForm.audio_system_name)
+async def audio_system_name_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите название аудиосистемы.")
+        return
+    await state.update_data(audio_system_name=value)
+    await state.set_state(InspectionForm.speaker_count)
+    await message.answer("Введите количество динамиков.\\n\\nНапример: 16")
+
+
+@dp.message(InspectionForm.speaker_count)
+async def speaker_count_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value.isdigit() or not 0 <= int(value) <= 100:
+        await message.answer("Введите количество динамиков цифрами от 0 до 100.")
+        return
+    await state.update_data(speaker_count=value)
+    await state.set_state(InspectionForm.engine_type)
+    await message.answer("Выберите тип двигателя.", reply_markup=engine_keyboard)
 
 
 # =========================================================
@@ -3313,9 +3414,13 @@ async def finish_photos_handler(
                     "body_color"
                 ],
 
-                wheel_radius=data[
-                    "wheel_radius"
-                ]
+                wheel_radius=data["wheel_radius"],
+                seat_material=data["seat_material"],
+                wheel_type=data["wheel_type"],
+                interior_color=data["interior_color"],
+                seat_count=data["seat_count"],
+                audio_system_name=data["audio_system_name"],
+                speaker_count=data["speaker_count"]
             )
         )
 

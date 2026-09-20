@@ -19,8 +19,8 @@ from openai import AsyncOpenAI
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate,
@@ -36,7 +36,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 
 # =========================================================
-# SETTINGS
+# НАСТРОЙКИ
 # =========================================================
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -44,8 +44,6 @@ PORT = int(os.getenv("PORT", "10000"))
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Можно поменять модель через Render Environment.
-# По умолчанию используется экономичная vision-модель.
 OPENAI_MODEL = os.getenv(
     "OPENAI_VISION_MODEL",
     "gpt-5.6-luna"
@@ -72,37 +70,32 @@ openai_client = AsyncOpenAI(
 
 
 # =========================================================
-# STATES
+# СОСТОЯНИЯ
 # =========================================================
 
 class InspectionForm(StatesGroup):
 
-    # Master
     master_name = State()
     report_date = State()
 
-    # Car
     make = State()
     model = State()
     year = State()
     vin = State()
     mileage = State()
 
-    # Engine
     engine_type = State()
     engine_volume = State()
     engine_hp = State()
     gearbox = State()
 
-    # LKP
     lkp = State()
 
-    # Photos
     photos = State()
 
 
 # =========================================================
-# KEYBOARDS
+# КЛАВИАТУРЫ
 # =========================================================
 
 main_keyboard = ReplyKeyboardMarkup(
@@ -158,7 +151,7 @@ finish_photos_keyboard = ReplyKeyboardMarkup(
 
 
 # =========================================================
-# LKP PARTS
+# ЛКП
 # =========================================================
 
 LKP_PARTS = [
@@ -177,7 +170,7 @@ LKP_PARTS = [
 
 
 # =========================================================
-# EQUIPMENT
+# КОМПЛЕКТАЦИЯ
 # =========================================================
 
 EQUIPMENT = {
@@ -379,7 +372,7 @@ EQUIPMENT = {
 
 
 # =========================================================
-# OPENAI STRUCTURED OUTPUT SCHEMA
+# СХЕМА ОТВЕТА AI
 # =========================================================
 
 EQUIPMENT_AI_SCHEMA = {
@@ -436,15 +429,10 @@ EQUIPMENT_AI_SCHEMA = {
 
 
 # =========================================================
-# AI HELPERS
+# ПОДГОТОВКА ФОТО ДЛЯ AI
 # =========================================================
 
 def prepare_ai_image(path):
-
-    """
-    Уменьшаем фотографию перед отправкой в AI,
-    чтобы не отправлять огромные оригиналы.
-    """
 
     img = Image.open(path)
 
@@ -478,6 +466,10 @@ def prepare_ai_image(path):
     )
 
 
+# =========================================================
+# PROMPT AI
+# =========================================================
+
 def build_equipment_prompt(car_data):
 
     equipment_lines = []
@@ -499,13 +491,11 @@ def build_equipment_prompt(car_data):
     )
 
     return f"""
-Ты являешься AI-модулем визуального анализа
-для профессионального отчёта осмотра автомобиля
-системы ЮРМАКС.
+Ты являешься модулем визуального анализа
+автомобиля для системы ЮРМАКС.
 
-Твоя задача — анализировать предоставленные фотографии
-автомобиля и определять ТОЛЬКО оборудование,
-которое действительно можно подтвердить визуально.
+Твоя задача — определить оборудование автомобиля
+по предоставленным фотографиям.
 
 Данные автомобиля:
 
@@ -516,72 +506,69 @@ def build_equipment_prompt(car_data):
 Объём: {car_data["engine_volume"]} л
 Коробка: {car_data["gearbox"]}
 
-СПИСОК ДОСТУПНЫХ ПУНКТОВ:
+ДОСТУПНЫЕ ПУНКТЫ:
 
 {equipment_text}
 
-КРИТИЧЕСКИЕ ПРАВИЛА:
+ПРАВИЛА:
 
-1. Никогда не угадывай комплектацию по марке,
-   модели, году или типичной комплектации.
+1. Определяй только то, что действительно видно
+   на предоставленных фотографиях.
 
-2. Не используй интернет-знания о конкретной модели
-   для утверждения наличия оборудования.
+2. Не угадывай комплектацию по марке,
+   модели или году.
 
-3. Возвращай пункт только тогда, когда оборудование
-   реально видно на предоставленной фотографии.
+3. Не используй типичную комплектацию модели
+   как доказательство наличия оборудования.
 
-4. Если оборудование можно предположить,
-   но оно не видно достаточно хорошо — НЕ возвращай его.
+4. Если оборудование не видно — не возвращай его.
 
-5. Если невозможно определить пункт по фотографиям —
-   НЕ возвращай его.
+5. Если оборудование можно только предположить —
+   не возвращай его.
 
-6. Отсутствие пункта в результате НЕ означает,
-   что его нет на автомобиле.
+6. Если оборудование скрыто и визуально
+   подтвердить его невозможно — не возвращай его.
 
-7. Для пункта "Цвет кузова" можно указать
-   визуально определяемый цвет.
+7. Отсутствие оборудования на фотографии
+   не означает, что его нет.
 
-8. Для "Тип кузова" можно указать визуально
-   определяемый тип кузова.
+8. Для бинарных опций используй значение:
+   "Есть".
 
-9. Для "Материал сидений" можно указать материал,
-   если он хорошо виден.
+9. Для описательных пунктов используй
+   конкретное визуальное значение.
 
-10. Для "Размер дисплея", "Количество динамиков",
-    "Название аудиосистемы" и подобных параметров
-    не придумывай цифры или названия.
-    Возвращай их только если они явно видны
-    на фото или непосредственно указаны на элементе.
+10. Не придумывай размеры, названия и цифры.
 
-11. Для бинарного оборудования используй value:
-    "Есть".
+11. Тип кузова можно определить визуально.
 
-12. Для описательного оборудования используй
-    конкретное визуальное значение.
+12. Цвет кузова можно определить визуально.
 
-13. evidence должно кратко объяснять,
-    что именно видно на фотографии.
+13. Материал сидений можно определить,
+    если он хорошо виден.
 
-14. Если на фотографии видна только часть автомобиля,
-    анализируй только эту часть.
+14. Название аудиосистемы можно определить
+    только если оно явно видно.
 
-15. Не определяй технические характеристики,
-    которые невозможно установить визуально.
+15. Размер дисплея можно указать только при наличии
+    явного визуального подтверждения.
 
-16. Не определяй ABS, ESP, подушки, иммобилайзер,
-    сигнализацию и другие скрытые системы только
-    по внешнему виду. Их можно подтверждать только
-    если есть явный визуальный признак,
-    например соответствующая кнопка, экран,
-    маркировка или элемент системы.
+16. Системы безопасности нельзя считать
+    установленными только потому, что автомобиль
+    определённой марки или модели.
 
 17. Не возвращай одинаковые пункты несколько раз.
 
-Верни только подтверждённые пункты.
+18. evidence должно кратко описывать визуальный
+    признак, на основании которого сделан вывод.
+
+Верни только действительно подтверждённые пункты.
 """
 
+
+# =========================================================
+# AI АНАЛИЗ ОДНОЙ ПАЧКИ
+# =========================================================
 
 async def analyze_equipment_batch(
     image_data_urls,
@@ -598,45 +585,66 @@ async def analyze_equipment_batch(
         }
     ]
 
+
     for image_url in image_data_urls:
 
         content.append(
+
             {
                 "type": "input_image",
                 "image_url": image_url
             }
         )
 
+
     response = await openai_client.responses.create(
 
         model=OPENAI_MODEL,
 
         input=[
+
             {
                 "role": "user",
+
                 "content": content
             }
         ],
 
         text={
+
             "format": {
+
                 "type": "json_schema",
-                "name": "yurmax_equipment_analysis",
-                "schema": EQUIPMENT_AI_SCHEMA,
-                "strict": True
+
+                "name":
+                    "yurmax_equipment_analysis",
+
+                "schema":
+                    EQUIPMENT_AI_SCHEMA,
+
+                "strict":
+                    True
             }
         }
     )
 
+
     text = response.output_text
 
+
     if not text:
+
         return {
             "confirmed": []
         }
 
+
     return json.loads(text)
 
+
+# =========================================================
+# AI АНАЛИЗ ВСЕХ ФОТО
+# =========================================================
 
 async def analyze_equipment_from_photos(
     photo_paths,
@@ -644,33 +652,30 @@ async def analyze_equipment_from_photos(
     progress_callback=None
 ):
 
-    """
-    Анализируем фотографии пачками.
-    """
-
-    # =====================================================
-    # Базовый результат:
-    # ВСЁ неизвестно до тех пор, пока AI не подтвердит.
-    # =====================================================
+    # -----------------------------------------------------
+    # По умолчанию все пункты пустые
+    # -----------------------------------------------------
 
     results = {}
+
 
     for category, options in EQUIPMENT.items():
 
         results[category] = {}
+
 
         for option in options:
 
             results[category][option] = {
 
                 "status":
-                    "Не подтверждено по фото",
+                    "Не определено",
 
                 "value":
                     "—",
 
                 "evidence":
-                    "Оборудование не удалось достоверно подтвердить по предоставленным фотографиям."
+                    ""
             }
 
 
@@ -679,11 +684,12 @@ async def analyze_equipment_from_photos(
         return results
 
 
-    # =====================================================
+    # -----------------------------------------------------
     # Подготавливаем фотографии
-    # =====================================================
+    # -----------------------------------------------------
 
     image_urls = []
+
 
     for path in photo_paths:
 
@@ -710,9 +716,9 @@ async def analyze_equipment_from_photos(
         return results
 
 
-    # =====================================================
-    # Разбиваем фотографии на небольшие пачки
-    # =====================================================
+    # -----------------------------------------------------
+    # Анализ пачками
+    # -----------------------------------------------------
 
     batch_size = 6
 
@@ -729,6 +735,7 @@ async def analyze_equipment_from_photos(
             start:start + batch_size
         ]
 
+
         if progress_callback:
 
             await progress_callback(
@@ -743,14 +750,18 @@ async def analyze_equipment_from_photos(
         try:
 
             result = await analyze_equipment_batch(
+
                 batch,
+
                 car_data
             )
+
 
             confirmed = result.get(
                 "confirmed",
                 []
             )
+
 
             if isinstance(
                 confirmed,
@@ -761,6 +772,7 @@ async def analyze_equipment_from_photos(
                     confirmed
                 )
 
+
         except Exception as e:
 
             print(
@@ -768,15 +780,12 @@ async def analyze_equipment_from_photos(
                 repr(e)
             )
 
-            # Не ломаем весь отчёт,
-            # если одна пачка фотографий
-            # не обработалась.
             continue
 
 
-    # =====================================================
+    # -----------------------------------------------------
     # Проверяем ответы AI
-    # =====================================================
+    # -----------------------------------------------------
 
     valid_categories = set(
         EQUIPMENT.keys()
@@ -834,28 +843,30 @@ async def analyze_equipment_from_photos(
 
 
         if category not in valid_categories:
+
             continue
 
 
-        if option not in valid_options[category]:
+        if option not in valid_options[
+            category
+        ]:
+
             continue
 
 
         if not value:
+
             value = "Есть"
 
 
-        if not evidence:
-            evidence = (
-                "Визуально подтверждено "
-                "на предоставленной фотографии."
-            )
-
-
-        results[category][option] = {
+        results[
+            category
+        ][
+            option
+        ] = {
 
             "status":
-                "Подтверждено по фото",
+                "Определено",
 
             "value":
                 value,
@@ -869,7 +880,7 @@ async def analyze_equipment_from_photos(
 
 
 # =========================================================
-# FONTS
+# ШРИФТЫ
 # =========================================================
 
 def register_fonts():
@@ -953,6 +964,7 @@ def get_pil_font(
         else REGULAR_FONT
     )
 
+
     return ImageFont.truetype(
         path,
         size
@@ -960,7 +972,7 @@ def get_pil_font(
 
 
 # =========================================================
-# LKP MAP
+# СТРЕЛКА ЛКП
 # =========================================================
 
 def draw_arrow(
@@ -1033,6 +1045,10 @@ def draw_arrow(
         fill=(70, 190, 130)
     )
 
+
+# =========================================================
+# КАРТА ЛКП
+# =========================================================
 
 def make_lkp_map(
     measurements
@@ -1358,7 +1374,9 @@ def make_lkp_map(
             continue
 
 
-        x, y, target = positions[part]
+        x, y, target = positions[
+            part
+        ]
 
 
         label_box(
@@ -1415,7 +1433,7 @@ def make_lkp_map(
 
 
 # =========================================================
-# PDF HEADER / FOOTER
+# HEADER / FOOTER PDF
 # =========================================================
 
 def pdf_header_footer(
@@ -1509,7 +1527,7 @@ def pdf_header_footer(
 
 
 # =========================================================
-# EQUIPMENT TABLE
+# ТАБЛИЦА КОМПЛЕКТАЦИИ
 # =========================================================
 
 def make_equipment_table(
@@ -1521,7 +1539,7 @@ def make_equipment_table(
     header_style = ParagraphStyle(
         "EquipmentHeader",
         fontName="DejaVuBold",
-        fontSize=8,
+        fontSize=8.5,
         leading=10,
         textColor=colors.white,
     )
@@ -1530,8 +1548,8 @@ def make_equipment_table(
     body_style = ParagraphStyle(
         "EquipmentBody",
         fontName="DejaVu",
-        fontSize=7.6,
-        leading=9.5,
+        fontSize=8,
+        leading=10,
         textColor=colors.HexColor("#202426"),
     )
 
@@ -1539,8 +1557,8 @@ def make_equipment_table(
     confirmed_style = ParagraphStyle(
         "EquipmentConfirmed",
         fontName="DejaVuBold",
-        fontSize=7.6,
-        leading=9.5,
+        fontSize=8,
+        leading=10,
         textColor=colors.HexColor("#278553"),
     )
 
@@ -1548,18 +1566,9 @@ def make_equipment_table(
     unknown_style = ParagraphStyle(
         "EquipmentUnknown",
         fontName="DejaVu",
-        fontSize=7.4,
-        leading=9.2,
+        fontSize=8,
+        leading=10,
         textColor=colors.HexColor("#777777"),
-    )
-
-
-    evidence_style = ParagraphStyle(
-        "EquipmentEvidence",
-        fontName="DejaVu",
-        fontSize=7,
-        leading=8.5,
-        textColor=colors.HexColor("#555B60"),
     )
 
 
@@ -1574,22 +1583,20 @@ def make_equipment_table(
             Paragraph(
                 "РЕЗУЛЬТАТ",
                 header_style
-            ),
-
-            Paragraph(
-                "ОСНОВАНИЕ",
-                header_style
             )
         ]
     ]
 
 
     category_results = (
+
         equipment_results.get(
             category,
             {}
         )
+
         if equipment_results
+
         else {}
     )
 
@@ -1597,23 +1604,22 @@ def make_equipment_table(
     for option in options:
 
         result = category_results.get(
+
             option,
+
             {
                 "status":
-                    "Не подтверждено по фото",
+                    "Не определено",
 
                 "value":
-                    "—",
-
-                "evidence":
-                    "Нет достоверного визуального подтверждения."
+                    "—"
             }
         )
 
 
         status = result.get(
             "status",
-            "Не подтверждено по фото"
+            "Не определено"
         )
 
 
@@ -1623,38 +1629,32 @@ def make_equipment_table(
         )
 
 
-        evidence = result.get(
-            "evidence",
-            "—"
-        )
+        if status == "Определено":
 
+            if not value:
 
-        if status == "Подтверждено по фото":
+                value = "Есть"
 
-            result_text = (
-                "Подтверждено по фото"
-            )
-
-            if value and value != "Есть":
-
-                result_text += (
-                    f"<br/><b>{value}</b>"
-                )
 
             result_paragraph = Paragraph(
-                result_text,
+
+                value,
+
                 confirmed_style
             )
 
         else:
 
             result_paragraph = Paragraph(
-                "Не подтверждено по фото",
+
+                "—",
+
                 unknown_style
             )
 
 
         data.append(
+
             [
 
                 Paragraph(
@@ -1662,28 +1662,26 @@ def make_equipment_table(
                     body_style
                 ),
 
-                result_paragraph,
-
-                Paragraph(
-                    evidence,
-                    evidence_style
-                )
+                result_paragraph
             ]
         )
 
 
     table = Table(
+
         data,
+
         colWidths=[
-            63 * mm,
-            42 * mm,
+            105 * mm,
             65 * mm
         ],
+
         repeatRows=1
     )
 
 
     table.setStyle(
+
         TableStyle([
 
             (
@@ -1712,14 +1710,14 @@ def make_equipment_table(
                 "LEFTPADDING",
                 (0, 0),
                 (-1, -1),
-                6
+                7
             ),
 
             (
                 "RIGHTPADDING",
                 (0, 0),
                 (-1, -1),
-                6
+                7
             ),
 
             (
@@ -1753,7 +1751,7 @@ def make_equipment_table(
 
 
 # =========================================================
-# SIGNATURE BLOCK
+# ПОДПИСЬ
 # =========================================================
 
 def signature_table(
@@ -1765,6 +1763,7 @@ def signature_table(
         [
 
             Paragraph(
+
                 "<b>МАСТЕР ОСМОТРА</b><br/><br/>"
                 + master_name
                 + "<br/><br/>"
@@ -1780,6 +1779,7 @@ def signature_table(
             ),
 
             Paragraph(
+
                 "<b>ПОДПИСЬ / ПЕЧАТЬ</b><br/><br/><br/>"
                 "________________________",
 
@@ -1796,11 +1796,14 @@ def signature_table(
 
 
     table = Table(
+
         data,
+
         colWidths=[
             85 * mm,
             85 * mm
         ],
+
         rowHeights=[
             35 * mm
         ]
@@ -1808,6 +1811,7 @@ def signature_table(
 
 
     table.setStyle(
+
         TableStyle([
 
             (
@@ -1854,7 +1858,7 @@ def signature_table(
 
 
 # =========================================================
-# CREATE PDF
+# СОЗДАНИЕ PDF
 # =========================================================
 
 def create_pdf(
@@ -1967,25 +1971,11 @@ def create_pdf(
     )
 
 
-    small_style = ParagraphStyle(
-
-        "SmallCustom",
-
-        fontName="DejaVu",
-
-        fontSize=8,
-
-        leading=11,
-
-        textColor=colors.HexColor("#666C70"),
-    )
-
-
     story = []
 
 
     # =====================================================
-    # FIRST PAGE
+    # ПЕРВАЯ СТРАНИЦА
     # =====================================================
 
     story.append(
@@ -1999,6 +1989,7 @@ def create_pdf(
     story.append(
 
         Paragraph(
+
             "ЮРМАКС",
 
             ParagraphStyle(
@@ -2178,6 +2169,7 @@ def create_pdf(
     report_info = Table(
 
         [
+
             [
                 "Дата формирования отчёта",
                 report_date
@@ -2187,6 +2179,7 @@ def create_pdf(
                 "Мастер осмотра",
                 master_name
             ],
+
         ],
 
         colWidths=[
@@ -2282,7 +2275,7 @@ def create_pdf(
 
 
     # =====================================================
-    # LKP
+    # ЛКП
     # =====================================================
 
     story.append(
@@ -2332,7 +2325,7 @@ def create_pdf(
 
 
     # =====================================================
-    # EQUIPMENT
+    # КОМПЛЕКТАЦИЯ
     # =====================================================
 
     story.append(
@@ -2352,28 +2345,8 @@ def create_pdf(
     story.append(
 
         Paragraph(
-            "Автоматический анализ предоставленных фотографий",
+            "Перечень оборудования автомобиля",
             subtitle_style
-        )
-    )
-
-
-    story.append(
-
-        Paragraph(
-            "<b>Важно:</b> отметка «Не подтверждено по фото» "
-            "не означает отсутствие оборудования. "
-            "Она означает, что данный пункт невозможно "
-            "достоверно подтвердить по предоставленным фотографиям.",
-            small_style
-        )
-    )
-
-
-    story.append(
-        Spacer(
-            1,
-            5 * mm
         )
     )
 
@@ -2392,8 +2365,11 @@ def create_pdf(
         story.append(
 
             make_equipment_table(
+
                 category,
+
                 options,
+
                 equipment_results
             )
         )
@@ -2408,7 +2384,7 @@ def create_pdf(
 
 
     # =====================================================
-    # ENGINE ENDOSCOPY
+    # ЭНДОСКОПИЯ
     # =====================================================
 
     if car_data["engine_type"] in [
@@ -2582,7 +2558,7 @@ def create_pdf(
 
 
     # =====================================================
-    # PHOTOS
+    # ФОТО
     # =====================================================
 
     if photo_paths:
@@ -2607,6 +2583,8 @@ def create_pdf(
                 "Фотоматериалы осмотра",
                 subtitle_style
             )
+
+
         )
 
 
@@ -2648,8 +2626,11 @@ def create_pdf(
                 img.convert(
                     "RGB"
                 ).save(
+
                     temp,
+
                     format="JPEG",
+
                     quality=90
                 )
 
@@ -2743,8 +2724,11 @@ def create_pdf(
                             img2.convert(
                                 "RGB"
                             ).save(
+
                                 temp2,
+
                                 format="JPEG",
+
                                 quality=90
                             )
 
@@ -2882,7 +2866,7 @@ def create_pdf(
 
 
     # =====================================================
-    # FINAL PAGE
+    # ФИНАЛ
     # =====================================================
 
     story.append(
@@ -2991,7 +2975,7 @@ async def start_handler(
 
 
 # =========================================================
-# CREATE
+# СОЗДАТЬ АКТ
 # =========================================================
 
 @dp.message(
@@ -3018,7 +3002,7 @@ async def create_handler(
 
 
 # =========================================================
-# MASTER
+# МАСТЕР
 # =========================================================
 
 @dp.message(
@@ -3060,7 +3044,7 @@ async def master_handler(
 
 
 # =========================================================
-# REPORT DATE
+# ДАТА
 # =========================================================
 
 @dp.message(
@@ -3118,7 +3102,7 @@ async def report_date_handler(
 
 
 # =========================================================
-# MAKE
+# МАРКА
 # =========================================================
 
 @dp.message(
@@ -3147,7 +3131,7 @@ async def make_handler(
 
 
 # =========================================================
-# MODEL
+# МОДЕЛЬ
 # =========================================================
 
 @dp.message(
@@ -3176,7 +3160,7 @@ async def model_handler(
 
 
 # =========================================================
-# YEAR
+# ГОД
 # =========================================================
 
 @dp.message(
@@ -3245,7 +3229,7 @@ async def vin_handler(
 
 
 # =========================================================
-# MILEAGE
+# ПРОБЕГ
 # =========================================================
 
 @dp.message(
@@ -3289,7 +3273,7 @@ async def mileage_handler(
 
 
 # =========================================================
-# ENGINE TYPE
+# ДВИГАТЕЛЬ
 # =========================================================
 
 @dp.message(
@@ -3342,7 +3326,7 @@ async def engine_type_handler(
 
 
 # =========================================================
-# ENGINE VOLUME
+# ОБЪЁМ
 # =========================================================
 
 @dp.message(
@@ -3392,7 +3376,7 @@ async def engine_volume_handler(
 
 
 # =========================================================
-# ENGINE HP
+# МОЩНОСТЬ
 # =========================================================
 
 @dp.message(
@@ -3436,7 +3420,7 @@ async def engine_hp_handler(
 
 
 # =========================================================
-# GEARBOX
+# КОРОБКА
 # =========================================================
 
 @dp.message(
@@ -3491,14 +3475,14 @@ async def gearbox_handler(
 
     await message.answer(
 
-        f"Введите толщину ЛКП.\n\n"
+        "Введите толщину ЛКП.\n\n"
         f"Деталь: {LKP_PARTS[0]}\n\n"
-        f"Например: 145"
+        "Например: 145"
     )
 
 
 # =========================================================
-# LKP
+# ЛКП
 # =========================================================
 
 @dp.message(
@@ -3547,7 +3531,9 @@ async def lkp_handler(
     current_part = LKP_PARTS[index]
 
 
-    measurements[current_part] = measurement
+    measurements[
+        current_part
+    ] = measurement
 
 
     next_index = index + 1
@@ -3569,7 +3555,7 @@ async def lkp_handler(
 
             f"Принято: {current_part} — "
             f"{measurement} µm\n\n"
-            f"Теперь введите значение для:\n"
+            "Теперь введите значение для:\n"
             f"{LKP_PARTS[next_index]}"
         )
 
@@ -3602,7 +3588,7 @@ async def lkp_handler(
 
 
 # =========================================================
-# PHOTOS
+# ФОТО
 # =========================================================
 
 @dp.message(
@@ -3644,7 +3630,7 @@ async def photo_handler(
 
 
 # =========================================================
-# FINISH PHOTOS
+# ГОТОВО
 # =========================================================
 
 @dp.message(
@@ -3680,7 +3666,7 @@ async def finish_photos_handler(
     await message.answer(
 
         f"Получено фотографий: {len(photo_ids)}.\n\n"
-        "Шаг 1/3 — загружаю фотографии..."
+        "Загружаю фотографии и формирую отчёт..."
     )
 
 
@@ -3689,9 +3675,9 @@ async def finish_photos_handler(
 
     try:
 
-        # =================================================
-        # DOWNLOAD PHOTOS
-        # =================================================
+        # -------------------------------------------------
+        # Скачиваем фото
+        # -------------------------------------------------
 
         for number, file_id in enumerate(
 
@@ -3706,6 +3692,7 @@ async def finish_photos_handler(
 
 
             path = (
+
                 f"/tmp/"
                 f"yurmax_photo_{number}.jpg"
             )
@@ -3724,9 +3711,9 @@ async def finish_photos_handler(
             )
 
 
-        # =================================================
-        # CAR DATA
-        # =================================================
+        # -------------------------------------------------
+        # Данные автомобиля
+        # -------------------------------------------------
 
         car_data = {
 
@@ -3759,14 +3746,13 @@ async def finish_photos_handler(
         }
 
 
-        # =================================================
-        # AI ANALYSIS
-        # =================================================
+        # -------------------------------------------------
+        # AI
+        # -------------------------------------------------
 
         await message.answer(
 
-            "Шаг 2/3 — AI анализирует фотографии "
-            "и определяет видимую комплектацию..."
+            "AI анализирует комплектацию автомобиля..."
         )
 
 
@@ -3775,9 +3761,6 @@ async def finish_photos_handler(
             total
         ):
 
-            # Небольшая функция прогресса.
-            # Не отправляем сообщение на каждый кадр,
-            # чтобы не засорять Telegram.
             print(
                 f"AI PHOTO BATCH: "
                 f"{current}/{total}"
@@ -3797,6 +3780,10 @@ async def finish_photos_handler(
         )
 
 
+        # -------------------------------------------------
+        # Считаем определённые пункты
+        # -------------------------------------------------
+
         confirmed_count = 0
 
 
@@ -3813,20 +3800,18 @@ async def finish_photos_handler(
 
                 if result.get(
                     "status"
-                ) == "Подтверждено по фото":
+                ) == "Определено":
 
                     confirmed_count += 1
 
 
-        # =================================================
+        # -------------------------------------------------
         # PDF
-        # =================================================
+        # -------------------------------------------------
 
         await message.answer(
 
-            "Шаг 3/3 — формирую профессиональный PDF...\n\n"
-            f"AI подтвердил по фотографиям: "
-            f"{confirmed_count} пунктов."
+            "Формирую PDF-отчёт..."
         )
 
 
@@ -3867,9 +3852,7 @@ async def finish_photos_handler(
         await message.answer(
 
             "Готово.\n\n"
-            "PDF-отчёт ЮРМАКС сформирован.\n\n"
-            f"AI визуально подтвердил "
-            f"{confirmed_count} пунктов комплектации.",
+            "PDF-отчёт ЮРМАКС сформирован.",
 
             reply_markup=main_keyboard
         )
@@ -3886,8 +3869,7 @@ async def finish_photos_handler(
         await message.answer(
 
             "Произошла ошибка при формировании отчёта.\n\n"
-            "Проверь логи Render.\n\n"
-            f"Ошибка: {str(e)[:500]}"
+            "Проверь логи Render."
         )
 
 
@@ -3910,7 +3892,7 @@ async def finish_photos_handler(
 
 
 # =========================================================
-# PHOTOS TEXT
+# ЕСЛИ ВМЕСТО ФОТО ПРИШЁЛ ТЕКСТ
 # =========================================================
 
 @dp.message(
@@ -3929,7 +3911,7 @@ async def photos_text_handler(
 
 
 # =========================================================
-# RENDER HEALTH SERVER
+# RENDER HEALTH
 # =========================================================
 
 async def health(

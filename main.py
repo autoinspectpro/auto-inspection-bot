@@ -11,7 +11,13 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+)
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -93,6 +99,13 @@ class InspectionForm(StatesGroup):
 
     photos = State()
 
+    # -----------------------------------------------------
+    # Новый этап:
+    # ручное подтверждение комплектации после AI
+    # -----------------------------------------------------
+
+    manual_equipment = State()
+
 
 # =========================================================
 # КЛАВИАТУРЫ
@@ -148,6 +161,36 @@ finish_photos_keyboard = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+
+
+# =========================================================
+# КЛАВИАТУРА РУЧНОЙ ПРОВЕРКИ
+# =========================================================
+
+def manual_equipment_keyboard():
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+
+            [
+                InlineKeyboardButton(
+                    text="Есть",
+                    callback_data="eq_yes"
+                ),
+
+                InlineKeyboardButton(
+                    text="Нет",
+                    callback_data="eq_no"
+                ),
+
+                InlineKeyboardButton(
+                    text="Пропустить",
+                    callback_data="eq_skip"
+                ),
+            ]
+
+        ]
+    )
 
 
 # =========================================================
@@ -652,10 +695,6 @@ async def analyze_equipment_from_photos(
     progress_callback=None
 ):
 
-    # -----------------------------------------------------
-    # По умолчанию все пункты пустые
-    # -----------------------------------------------------
-
     results = {}
 
 
@@ -684,10 +723,6 @@ async def analyze_equipment_from_photos(
         return results
 
 
-    # -----------------------------------------------------
-    # Подготавливаем фотографии
-    # -----------------------------------------------------
-
     image_urls = []
 
 
@@ -715,10 +750,6 @@ async def analyze_equipment_from_photos(
 
         return results
 
-
-    # -----------------------------------------------------
-    # Анализ пачками
-    # -----------------------------------------------------
 
     batch_size = 6
 
@@ -782,10 +813,6 @@ async def analyze_equipment_from_photos(
 
             continue
 
-
-    # -----------------------------------------------------
-    # Проверяем ответы AI
-    # -----------------------------------------------------
 
     valid_categories = set(
         EQUIPMENT.keys()
@@ -877,6 +904,448 @@ async def analyze_equipment_from_photos(
 
 
     return results
+
+
+# =========================================================
+# СОЗДАНИЕ СПИСКА ДЛЯ РУЧНОЙ ПРОВЕРКИ
+# =========================================================
+
+def build_manual_equipment_queue(
+    equipment_results
+):
+
+    queue = []
+
+
+    for category, options in EQUIPMENT.items():
+
+        category_results = equipment_results.get(
+            category,
+            {}
+        )
+
+
+        for option in options:
+
+            result = category_results.get(
+
+                option,
+
+                {
+                    "status":
+                        "Не определено",
+
+                    "value":
+                        "—"
+                }
+            )
+
+
+            status = result.get(
+                "status",
+                "Не определено"
+            )
+
+
+            # -------------------------------------------------
+            # В ручную проверку попадают только те пункты,
+            # которые AI не смог определить
+            # -------------------------------------------------
+
+            if status != "Определено":
+
+                queue.append({
+
+                    "category":
+                        category,
+
+                    "option":
+                        option
+                })
+
+
+    return queue
+
+
+# =========================================================
+# СЛЕДУЮЩИЙ РУЧНОЙ ВОПРОС
+# =========================================================
+
+async def ask_next_manual_equipment(
+    message,
+    state
+):
+
+    data = await state.get_data()
+
+
+    queue = data.get(
+        "manual_equipment_queue",
+        []
+    )
+
+
+    index = data.get(
+        "manual_equipment_index",
+        0
+    )
+
+
+    if index >= len(queue):
+
+        return False
+
+
+    item = queue[index]
+
+
+    category = item["category"]
+
+    option = item["option"]
+
+
+    progress = (
+        f"{index + 1} из {len(queue)}"
+    )
+
+
+    await message.answer(
+
+        f"Проверка комплектации\n\n"
+        f"Раздел: {category}\n"
+        f"Опция: {option}\n\n"
+        f"В наличии эта опция?",
+        
+        reply_markup=manual_equipment_keyboard()
+    )
+
+
+    await state.update_data(
+
+        manual_current_category=category,
+
+        manual_current_option=option
+    )
+
+
+    return True
+
+
+# =========================================================
+# ЗАВЕРШЕНИЕ РУЧНОЙ ПРОВЕРКИ
+# =========================================================
+
+async def finish_manual_equipment(
+    message,
+    state
+):
+
+    data = await state.get_data()
+
+
+    car_data = {
+
+        "make":
+            data["make"],
+
+        "model":
+            data["model"],
+
+        "year":
+            data["year"],
+
+        "vin":
+            data["vin"],
+
+        "mileage":
+            data["mileage"],
+
+        "engine_type":
+            data["engine_type"],
+
+        "engine_volume":
+            data["engine_volume"],
+
+        "engine_hp":
+            data["engine_hp"],
+
+        "gearbox":
+            data["gearbox"],
+    }
+
+
+    equipment_results = data.get(
+        "equipment_results",
+        {}
+    )
+
+
+    photo_paths = data.get(
+        "photo_paths",
+        []
+    )
+
+
+    await message.answer(
+        "Все ответы по комплектации получены.\n\n"
+        "Формирую PDF-отчёт..."
+    )
+
+
+    try:
+
+        pdf = create_pdf(
+
+            car_data=car_data,
+
+            measurements=data[
+                "measurements"
+            ],
+
+            master_name=data[
+                "master_name"
+            ],
+
+            report_date=data[
+                "report_date"
+            ],
+
+            photo_paths=photo_paths,
+
+            equipment_results=equipment_results
+        )
+
+
+        await message.answer_document(
+
+            types.BufferedInputFile(
+
+                pdf.read(),
+
+                filename=
+                    "YURMAX_AKT_OSMOTRA.pdf"
+            )
+        )
+
+
+        await message.answer(
+
+            "Готово.\n\n"
+            "PDF-отчёт ЮРМАКС сформирован.",
+
+            reply_markup=main_keyboard
+        )
+
+
+    except Exception as e:
+
+        print(
+            "PDF ERROR:",
+            repr(e)
+        )
+
+
+        await message.answer(
+
+            "Произошла ошибка при формировании PDF.\n\n"
+            "Проверь логи Render."
+        )
+
+
+    finally:
+
+        for path in photo_paths:
+
+            try:
+
+                if os.path.exists(path):
+
+                    os.remove(path)
+
+            except Exception:
+
+                pass
+
+
+        await state.clear()
+
+
+# =========================================================
+# ОБРАБОТКА КНОПОК РУЧНОГО ВВОДА
+# =========================================================
+
+@dp.callback_query(
+    InspectionForm.manual_equipment,
+    F.data.in_([
+        "eq_yes",
+        "eq_no",
+        "eq_skip"
+    ])
+)
+async def manual_equipment_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    data = await state.get_data()
+
+
+    equipment_results = data.get(
+        "equipment_results",
+        {}
+    )
+
+
+    category = data.get(
+        "manual_current_category"
+    )
+
+
+    option = data.get(
+        "manual_current_option"
+    )
+
+
+    if not category or not option:
+
+        await callback.answer(
+            "Ошибка состояния. Начните новый акт.",
+            show_alert=True
+        )
+
+        return
+
+
+    # -----------------------------------------------------
+    # Определяем ответ
+    # -----------------------------------------------------
+
+    if callback.data == "eq_yes":
+
+        value = "Есть"
+
+    elif callback.data == "eq_no":
+
+        value = "Нет"
+
+    else:
+
+        value = "—"
+
+
+    # -----------------------------------------------------
+    # Сохраняем ручной результат
+    # -----------------------------------------------------
+
+    equipment_results[category][option] = {
+
+        "status":
+            "Ручной ввод",
+
+        "value":
+            value,
+
+        "evidence":
+            ""
+    }
+
+
+    index = data.get(
+        "manual_equipment_index",
+        0
+    )
+
+
+    queue = data.get(
+        "manual_equipment_queue",
+        []
+    )
+
+
+    next_index = index + 1
+
+
+    await state.update_data(
+
+        equipment_results=
+            equipment_results,
+
+        manual_equipment_index=
+            next_index
+    )
+
+
+    # -----------------------------------------------------
+    # Убираем старую клавиатуру
+    # -----------------------------------------------------
+
+    try:
+
+        await callback.message.edit_reply_markup(
+            reply_markup=None
+        )
+
+    except Exception:
+
+        pass
+
+
+    await callback.answer()
+
+
+    # -----------------------------------------------------
+    # Следующий вопрос
+    # -----------------------------------------------------
+
+    if next_index < len(queue):
+
+        item = queue[next_index]
+
+
+        next_category = item[
+            "category"
+        ]
+
+        next_option = item[
+            "option"
+        ]
+
+
+        await state.update_data(
+
+            manual_current_category=
+                next_category,
+
+            manual_current_option=
+                next_option
+        )
+
+
+        await callback.message.answer(
+
+            f"Проверка комплектации\n\n"
+            f"Раздел: {next_category}\n"
+            f"Опция: {next_option}\n\n"
+            f"В наличии эта опция?",
+
+            reply_markup=
+                manual_equipment_keyboard()
+        )
+
+
+        return
+
+
+    # -----------------------------------------------------
+    # Всё закончено
+    # -----------------------------------------------------
+
+    await finish_manual_equipment(
+
+        callback.message,
+
+        state
+    )
 
 
 # =========================================================
@@ -1563,6 +2032,15 @@ def make_equipment_table(
     )
 
 
+    manual_style = ParagraphStyle(
+        "EquipmentManual",
+        fontName="DejaVuBold",
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#315F91"),
+    )
+
+
     unknown_style = ParagraphStyle(
         "EquipmentUnknown",
         fontName="DejaVu",
@@ -1629,6 +2107,10 @@ def make_equipment_table(
         )
 
 
+        # -------------------------------------------------
+        # AI определил
+        # -------------------------------------------------
+
         if status == "Определено":
 
             if not value:
@@ -1642,6 +2124,41 @@ def make_equipment_table(
 
                 confirmed_style
             )
+
+
+        # -------------------------------------------------
+        # Пользователь ответил вручную
+        # -------------------------------------------------
+
+        elif status == "Ручной ввод":
+
+            if not value:
+
+                value = "—"
+
+
+            if value == "—":
+
+                result_paragraph = Paragraph(
+
+                    "—",
+
+                    unknown_style
+                )
+
+            else:
+
+                result_paragraph = Paragraph(
+
+                    value,
+
+                    manual_style
+                )
+
+
+        # -------------------------------------------------
+        # Ничего не определено
+        # -------------------------------------------------
 
         else:
 
@@ -2583,8 +3100,6 @@ def create_pdf(
                 "Фотоматериалы осмотра",
                 subtitle_style
             )
-
-
         )
 
 
@@ -3666,7 +4181,7 @@ async def finish_photos_handler(
     await message.answer(
 
         f"Получено фотографий: {len(photo_ids)}.\n\n"
-        "Загружаю фотографии и формирую отчёт..."
+        "Загружаю фотографии и формирую анализ..."
     )
 
 
@@ -3752,7 +4267,7 @@ async def finish_photos_handler(
 
         await message.answer(
 
-            "AI анализирует комплектацию автомобиля..."
+            "Анализирую комплектацию по фотографиям..."
         )
 
 
@@ -3781,80 +4296,128 @@ async def finish_photos_handler(
 
 
         # -------------------------------------------------
-        # Считаем определённые пункты
+        # Список неопределённых пунктов
         # -------------------------------------------------
 
-        confirmed_count = 0
-
-
-        for category in equipment_results:
-
-            for option in equipment_results[
-                category
-            ]:
-
-                result = equipment_results[
-                    category
-                ][option]
-
-
-                if result.get(
-                    "status"
-                ) == "Определено":
-
-                    confirmed_count += 1
-
-
-        # -------------------------------------------------
-        # PDF
-        # -------------------------------------------------
-
-        await message.answer(
-
-            "Формирую PDF-отчёт..."
+        manual_queue = build_manual_equipment_queue(
+            equipment_results
         )
 
 
-        pdf = create_pdf(
+        # -------------------------------------------------
+        # Сохраняем всё в FSM
+        # -------------------------------------------------
 
-            car_data=car_data,
+        await state.update_data(
 
-            measurements=data[
-                "measurements"
-            ],
+            equipment_results=
+                equipment_results,
 
-            master_name=data[
-                "master_name"
-            ],
+            manual_equipment_queue=
+                manual_queue,
 
-            report_date=data[
-                "report_date"
-            ],
+            manual_equipment_index=
+                0,
 
-            photo_paths=photo_paths,
-
-            equipment_results=equipment_results
+            photo_paths=
+                photo_paths
         )
 
 
-        await message.answer_document(
+        # -------------------------------------------------
+        # Если AI определил абсолютно всё
+        # -------------------------------------------------
 
-            types.BufferedInputFile(
+        if not manual_queue:
 
-                pdf.read(),
-
-                filename=
-                    "YURMAX_AKT_OSMOTRA.pdf"
+            await message.answer(
+                "Комплектация определена.\n\n"
+                "Формирую PDF-отчёт..."
             )
-        )
 
+
+            pdf = create_pdf(
+
+                car_data=car_data,
+
+                measurements=data[
+                    "measurements"
+                ],
+
+                master_name=data[
+                    "master_name"
+                ],
+
+                report_date=data[
+                    "report_date"
+                ],
+
+                photo_paths=photo_paths,
+
+                equipment_results=
+                    equipment_results
+            )
+
+
+            await message.answer_document(
+
+                types.BufferedInputFile(
+
+                    pdf.read(),
+
+                    filename=
+                        "YURMAX_AKT_OSMOTRA.pdf"
+                )
+            )
+
+
+            await message.answer(
+
+                "Готово.\n\n"
+                "PDF-отчёт ЮРМАКС сформирован.",
+
+                reply_markup=main_keyboard
+            )
+
+
+            for path in photo_paths:
+
+                try:
+
+                    if os.path.exists(path):
+
+                        os.remove(path)
+
+                except Exception:
+
+                    pass
+
+
+            await state.clear()
+
+            return
+
+
+        # -------------------------------------------------
+        # Есть неопределённые пункты
+        # -------------------------------------------------
 
         await message.answer(
 
-            "Готово.\n\n"
-            "PDF-отчёт ЮРМАКС сформирован.",
+            "AI не смог определить часть оборудования.\n\n"
+            "Теперь я покажу только неопределённые пункты.\n"
+            "Для каждого выбери «Есть», «Нет» или «Пропустить»."
+        )
 
-            reply_markup=main_keyboard
+
+        await state.set_state(
+            InspectionForm.manual_equipment
+        )
+
+
+        await ask_next_manual_equipment(
+            message,
+            state
         )
 
 
@@ -3872,8 +4435,6 @@ async def finish_photos_handler(
             "Проверь логи Render."
         )
 
-
-    finally:
 
         for path in photo_paths:
 

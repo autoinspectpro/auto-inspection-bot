@@ -94,6 +94,14 @@ class InspectionForm(StatesGroup):
 
     manual_equipment = State()
 
+    endoscopy_cylinders = State()
+    endoscopy_cylinder_walls = State()
+    endoscopy_pistons = State()
+    endoscopy_scoring = State()
+    endoscopy_carbon = State()
+    endoscopy_oil = State()
+    endoscopy_overall = State()
+
 
 # =========================================================
 # КЛАВИАТУРЫ
@@ -1408,7 +1416,8 @@ def create_pdf(
     master_name,
     report_date,
     photo_paths=None,
-    equipment_results=None
+    equipment_results=None,
+    endoscopy_data=None
 ):
 
     if photo_paths is None:
@@ -1416,6 +1425,9 @@ def create_pdf(
 
     if equipment_results is None:
         equipment_results = {}
+
+    if endoscopy_data is None:
+        endoscopy_data = {}
 
     output = BytesIO()
 
@@ -1909,7 +1921,9 @@ def create_pdf(
     if car_data["engine_type"] in [
 
         "Бензин",
-        "Дизель"
+        "Дизель",
+        "Гибрид",
+        "Электро"
     ]:
 
         story.append(
@@ -1932,7 +1946,7 @@ def create_pdf(
             )
         )
 
-        endoscopy_data = [
+        endoscopy_rows = [
 
             [
                 "Параметр",
@@ -1951,43 +1965,43 @@ def create_pdf(
 
             [
                 "Цилиндры",
-                "Не заполнено"
+                endoscopy_data.get("cylinders", "—")
             ],
 
             [
                 "Стенки цилиндров",
-                "Не заполнено"
+                endoscopy_data.get("cylinder_walls", "—")
             ],
 
             [
                 "Поршни",
-                "Не заполнено"
+                endoscopy_data.get("pistons", "—")
             ],
 
             [
                 "Следы задиров",
-                "Не заполнено"
+                endoscopy_data.get("scoring", "—")
             ],
 
             [
                 "Следы нагара",
-                "Не заполнено"
+                endoscopy_data.get("carbon", "—")
             ],
 
             [
                 "Следы масла",
-                "Не заполнено"
+                endoscopy_data.get("oil", "—")
             ],
 
             [
                 "Общее состояние",
-                "Не заполнено"
+                endoscopy_data.get("overall", "—")
             ],
         ]
 
         endoscopy_table = Table(
 
-            endoscopy_data,
+            endoscopy_rows,
 
             colWidths=[
                 80 * mm,
@@ -2418,6 +2432,11 @@ async def generate_and_send_report(
 
             equipment_results=data.get(
                 "equipment_results",
+                {}
+            ),
+
+            endoscopy_data=data.get(
+                "endoscopy_data",
                 {}
             )
         )
@@ -3636,16 +3655,107 @@ async def manual_equipment_callback(
 
         pass
 
+    await state.set_state(InspectionForm.endoscopy_cylinders)
+
     await callback.message.answer(
-
         "Комплектация полностью заполнена.\n\n"
-        "Формирую PDF-отчёт..."
+        "Теперь заполним эндоскопию двигателя вручную.\n\n"
+        "1/7. Введите результат по цилиндрам."
     )
 
-    await generate_and_send_report(
-        callback.message,
-        state
-    )
+
+
+# =========================================================
+# ЭНДОСКОПИЯ — РУЧНОЙ ВВОД
+# =========================================================
+
+async def save_endoscopy_value(message, state, key, value, next_state, prompt):
+    data = await state.get_data()
+    endoscopy_data = data.get("endoscopy_data", {})
+    endoscopy_data[key] = value
+    await state.update_data(endoscopy_data=endoscopy_data)
+    await state.set_state(next_state)
+    await message.answer(prompt)
+
+
+@dp.message(InspectionForm.endoscopy_cylinders)
+async def endoscopy_cylinders_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите результат по цилиндрам.")
+        return
+    await save_endoscopy_value(message, state, "cylinders", value,
+                               InspectionForm.endoscopy_cylinder_walls,
+                               "2/7. Опишите стенки цилиндров.")
+
+
+@dp.message(InspectionForm.endoscopy_cylinder_walls)
+async def endoscopy_walls_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите состояние стенок цилиндров.")
+        return
+    await save_endoscopy_value(message, state, "cylinder_walls", value,
+                               InspectionForm.endoscopy_pistons,
+                               "3/7. Опишите состояние поршней.")
+
+
+@dp.message(InspectionForm.endoscopy_pistons)
+async def endoscopy_pistons_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите состояние поршней.")
+        return
+    await save_endoscopy_value(message, state, "pistons", value,
+                               InspectionForm.endoscopy_scoring,
+                               "4/7. Опишите наличие или отсутствие задиров.")
+
+
+@dp.message(InspectionForm.endoscopy_scoring)
+async def endoscopy_scoring_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите информацию о задирах.")
+        return
+    await save_endoscopy_value(message, state, "scoring", value,
+                               InspectionForm.endoscopy_carbon,
+                               "5/7. Опишите наличие или отсутствие нагара.")
+
+
+@dp.message(InspectionForm.endoscopy_carbon)
+async def endoscopy_carbon_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите информацию о нагаре.")
+        return
+    await save_endoscopy_value(message, state, "carbon", value,
+                               InspectionForm.endoscopy_oil,
+                               "6/7. Опишите наличие или отсутствие масла.")
+
+
+@dp.message(InspectionForm.endoscopy_oil)
+async def endoscopy_oil_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите информацию о следах масла.")
+        return
+    await save_endoscopy_value(message, state, "oil", value,
+                               InspectionForm.endoscopy_overall,
+                               "7/7. Введите общее состояние двигателя по результатам эндоскопии.")
+
+
+@dp.message(InspectionForm.endoscopy_overall)
+async def endoscopy_overall_handler(message: types.Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Введите общее состояние двигателя.")
+        return
+    data = await state.get_data()
+    endoscopy_data = data.get("endoscopy_data", {})
+    endoscopy_data["overall"] = value
+    await state.update_data(endoscopy_data=endoscopy_data)
+    await message.answer("Эндоскопия заполнена. Формирую PDF-отчёт...")
+    await generate_and_send_report(message, state)
 
 
 # =========================================================

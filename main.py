@@ -3,26 +3,55 @@ import asyncio
 from io import BytesIO
 
 from aiohttp import web
-from PIL import Image, ImageDraw, ImageFont
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
+from PIL import Image, ImageDraw, ImageFont
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    PageBreak,
+    Image as RLImage,
+)
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+
+# =========================================================
+# SETTINGS
+# =========================================================
 
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
 
 
-# ==========================================
-# СОСТОЯНИЯ
-# ==========================================
+# =========================================================
+# BOT
+# =========================================================
+
+bot = Bot(TOKEN)
+dp = Dispatcher()
+
+
+# =========================================================
+# STATES
+# =========================================================
 
 class InspectionForm(StatesGroup):
     make = State()
@@ -30,14 +59,15 @@ class InspectionForm(StatesGroup):
     year = State()
     vin = State()
     mileage = State()
+
     lkp = State()
 
 
-# ==========================================
-# МЕНЮ
-# ==========================================
+# =========================================================
+# KEYBOARD
+# =========================================================
 
-main_menu = ReplyKeyboardMarkup(
+main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Создать акт")]
     ],
@@ -45,58 +75,249 @@ main_menu = ReplyKeyboardMarkup(
 )
 
 
-# ==========================================
-# ДЕТАЛИ ДЛЯ ИЗМЕРЕНИЯ ЛКП
-# ==========================================
+# =========================================================
+# LKP PARTS
+# =========================================================
 
 LKP_PARTS = [
-    ("Капот", "hood"),
-    ("Крыша", "roof"),
-    ("Крышка багажника", "trunk"),
-
-    ("Переднее левое крыло", "fl_fender"),
-    ("Передняя левая дверь", "fl_door"),
-    ("Задняя левая дверь", "rl_door"),
-    ("Заднее левое крыло", "rl_fender"),
-
-    ("Переднее правое крыло", "fr_fender"),
-    ("Передняя правая дверь", "fr_door"),
-    ("Задняя правая дверь", "rr_door"),
-    ("Заднее правое крыло", "rr_fender"),
+    "Капот",
+    "Крыша",
+    "Крышка багажника",
+    "Переднее левое крыло",
+    "Передняя левая дверь",
+    "Задняя левая дверь",
+    "Заднее левое крыло",
+    "Переднее правое крыло",
+    "Передняя правая дверь",
+    "Задняя правая дверь",
+    "Заднее правое крыло",
 ]
 
 
-# ==========================================
-# ШРИФТЫ
-# ==========================================
+# =========================================================
+# EQUIPMENT TABLES
+# =========================================================
 
-def get_font(size, bold=False):
-    possible_fonts = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        if bold else
+EQUIPMENT = {
+    "ЭКСТЕРЬЕР": [
+        "Тип кузова",
+        "Цвет кузова",
+        "Тип лакокрасочного покрытия",
+        "LED-фары",
+        "Ксеноновые фары",
+        "Галогенные фары",
+        "Матричные фары",
+        "Дневные ходовые огни",
+        "Автоматический дальний свет",
+        "Противотуманные фары",
+        "Омыватели фар",
+        "Датчик света",
+        "Датчик дождя",
+        "Электрорегулировка зеркал",
+        "Обогрев зеркал",
+        "Электроскладывание зеркал",
+        "Автозатемнение зеркала",
+        "Повторители поворотов в зеркалах",
+        "Панорамная крыша",
+        "Люк",
+        "Рейлинги",
+        "Спойлер",
+        "Хромированные элементы",
+        "Спортивный обвес",
+        "Размер колёс",
+        "Тип дисков",
+        "Электропривод крышки багажника",
+    ],
+
+    "ИНТЕРЬЕР": [
+        "Материал сидений",
+        "Цвет салона",
+        "Кожаный салон",
+        "Комбинированный салон",
+        "Тканевый салон",
+        "Спортивные сиденья",
+        "Электрорегулировка сидений",
+        "Память сиденья",
+        "Подогрев передних сидений",
+        "Подогрев задних сидений",
+        "Вентиляция сидений",
+        "Массаж сидений",
+        "Электрорегулировка руля",
+        "Подогрев руля",
+        "Мультируль",
+        "Подрулевые лепестки",
+        "Цифровая приборная панель",
+        "Проекционный дисплей HUD",
+        "Амбиентная подсветка",
+        "Электрохромное зеркало",
+        "Солнцезащитные шторки",
+        "Центральный подлокотник",
+        "Декоративные вставки",
+        "Количество мест",
+    ],
+
+    "КОМФОРТ": [
+        "Кондиционер",
+        "Климат-контроль",
+        "Двухзонный климат",
+        "Трёхзонный климат",
+        "Автономный отопитель",
+        "Бесключевой доступ",
+        "Запуск двигателя кнопкой",
+        "Дистанционный запуск",
+        "Круиз-контроль",
+        "Адаптивный круиз-контроль",
+        "Электропривод окон",
+        "Электропривод багажника",
+        "Доводчики дверей",
+        "Центральный замок",
+        "Автоматическое запирание дверей",
+        "Подогрев лобового стекла",
+        "Подогрев форсунок омывателя",
+        "Обогрев заднего стекла",
+        "Беспроводная зарядка",
+        "USB-разъёмы",
+        "12V-разъём",
+        "Бесконтактное открытие багажника",
+        "Автоматическая парковка",
+        "Режимы движения",
+        "Электрический ручник",
+        "Auto Hold",
+    ],
+
+    "МУЛЬТИМЕДИА": [
+        "Центральный дисплей",
+        "Размер дисплея",
+        "Сенсорный экран",
+        "Цифровая приборная панель",
+        "Навигация",
+        "Bluetooth",
+        "Apple CarPlay",
+        "Android Auto",
+        "Беспроводной CarPlay",
+        "USB / USB-C",
+        "Голосовое управление",
+        "Интернет-сервисы",
+        "Радио",
+        "DAB",
+        "Штатная аудиосистема",
+        "Премиальная аудиосистема",
+        "Название аудиосистемы",
+        "Количество динамиков",
+        "Сабвуфер",
+        "Усилитель",
+        "Мультимедиа для задних пассажиров",
+        "Дополнительные экраны",
+    ],
+
+    "БЕЗОПАСНОСТЬ": [
+        "Передние подушки безопасности",
+        "Боковые подушки безопасности",
+        "Шторки безопасности",
+        "Коленная подушка безопасности",
+        "ABS",
+        "ESP / ESC",
+        "Traction Control",
+        "Камера заднего вида",
+        "Камеры 360°",
+        "Передние парктроники",
+        "Задние парктроники",
+        "Контроль слепых зон",
+        "Предупреждение о столкновении",
+        "Автоматическое экстренное торможение",
+        "Контроль полосы движения",
+        "Удержание в полосе",
+        "Распознавание дорожных знаков",
+        "Адаптивный дальний свет",
+        "Мониторинг усталости водителя",
+        "Контроль давления в шинах",
+        "Ассистент парковки",
+        "Ассистент движения в пробке",
+        "Адаптивный круиз",
+        "Предупреждение при выезде с парковки",
+        "ISOFIX",
+        "Иммобилайзер",
+        "Сигнализация",
+    ],
+
+    "ДОПОЛНИТЕЛЬНЫЕ ОПЦИИ": [
+        "Webasto / автономный отопитель",
+        "Фаркоп",
+        "Электрический фаркоп",
+        "Розетка 220V",
+        "Дополнительная шумоизоляция",
+        "Спортивный пакет",
+        "M / AMG / S-line / RS-пакет",
+        "Заводской декоративный пакет",
+        "Дополнительное освещение",
+        "Защитные элементы кузова",
+        "Оригинальные аксессуары",
+        "Дополнительные камеры",
+        "Дополнительные датчики",
+        "Доработанная аудиосистема",
+        "Другое оборудование",
+    ],
+}
+
+
+# =========================================================
+# FONTS
+# =========================================================
+
+def register_fonts():
+    possible_regular = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-
-        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"
-        if bold else
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     ]
 
-    for path in possible_fonts:
+    possible_bold = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    ]
+
+    regular = None
+    bold = None
+
+    for path in possible_regular:
         if os.path.exists(path):
-            return ImageFont.truetype(path, size)
+            regular = path
+            break
 
-    return ImageFont.load_default()
+    for path in possible_bold:
+        if os.path.exists(path):
+            bold = path
+            break
+
+    if not regular or not bold:
+        raise RuntimeError("DejaVu Sans fonts not found")
+
+    pdfmetrics.registerFont(TTFont("DejaVu", regular))
+    pdfmetrics.registerFont(TTFont("DejaVuBold", bold))
+
+    return regular, bold
 
 
-# ==========================================
-# ГРАФИКА АВТОМОБИЛЯ
-# ==========================================
+REGULAR_FONT, BOLD_FONT = register_fonts()
 
-def draw_arrow(draw, start, end, width=3):
+
+# =========================================================
+# PIL FONT
+# =========================================================
+
+def get_pil_font(size, bold=False):
+    path = BOLD_FONT if bold else REGULAR_FONT
+    return ImageFont.truetype(path, size)
+
+
+# =========================================================
+# DRAW ARROW
+# =========================================================
+
+def draw_arrow(draw, start, end):
     draw.line(
         [start, end],
-        fill=(45, 45, 50),
-        width=width
+        fill=(70, 190, 130),
+        width=5
     )
 
     x1, y1 = start
@@ -110,556 +331,765 @@ def draw_arrow(draw, start, end, width=3):
     ux = dx / length
     uy = dy / length
 
-    size = 10
+    size = 18
 
-    p1 = (
-        x2 - ux * size - uy * size * 0.5,
-        y2 - uy * size + ux * size * 0.5
+    left = (
+        x2 - ux * size - uy * size * 0.6,
+        y2 - uy * size + ux * size * 0.6
     )
 
-    p2 = (
-        x2 - ux * size + uy * size * 0.5,
-        y2 - uy * size - ux * size * 0.5
+    right = (
+        x2 - ux * size + uy * size * 0.6,
+        y2 - uy * size - ux * size * 0.6
     )
 
     draw.polygon(
-        [(x2, y2), p1, p2],
-        fill=(45, 45, 50)
+        [(x2, y2), left, right],
+        fill=(70, 190, 130)
     )
 
 
-def make_lkp_report(car_data, measurements):
+# =========================================================
+# LKP MAP
+# =========================================================
+
+def make_lkp_map(measurements):
     width = 1600
-    height = 2200
+    height = 1350
 
-    image = Image.new(
-        "RGB",
-        (width, height),
-        (247, 247, 245)
-    )
+    img = Image.new("RGB", (width, height), (12, 15, 17))
+    draw = ImageDraw.Draw(img)
 
-    draw = ImageDraw.Draw(image)
-
-    title_font = get_font(58, True)
-    subtitle_font = get_font(32, False)
-    section_font = get_font(36, True)
-    label_font = get_font(25, True)
-    value_font = get_font(28, True)
-    small_font = get_font(23, False)
-
-    # ======================================
-    # ШАПКА
-    # ======================================
-
-    draw.rectangle(
-        [0, 0, width, 190],
-        fill=(22, 24, 27)
-    )
+    title_font = get_pil_font(48, True)
+    subtitle_font = get_pil_font(30, False)
+    label_font = get_pil_font(25, True)
+    value_font = get_pil_font(26, True)
 
     draw.text(
-        (70, 38),
-        "ЮРМАКС",
+        (60, 45),
+        "КАРТА ЛАКОКРАСОЧНОГО ПОКРЫТИЯ",
         font=title_font,
         fill=(255, 255, 255)
     )
 
     draw.text(
-        (70, 112),
-        "АКТ ОСМОТРА АВТОМОБИЛЯ",
+        (60, 110),
+        "ЮРМАКС",
         font=subtitle_font,
-        fill=(205, 205, 205)
+        fill=(70, 190, 130)
     )
 
-    # ======================================
-    # ДАННЫЕ АВТОМОБИЛЯ
-    # ======================================
+    # Car body
+    car_x1 = 560
+    car_x2 = 1040
+    car_y1 = 230
+    car_y2 = 1100
 
-    y = 235
-
-    draw.text(
-        (70, y),
-        "КАРТА ЛАКОКРАСОЧНОГО ПОКРЫТИЯ",
-        font=section_font,
-        fill=(25, 25, 28)
-    )
-
-    y += 65
-
-    info = [
-        f"Автомобиль: {car_data['make']} {car_data['model']}",
-        f"Год выпуска: {car_data['year']}",
-        f"VIN: {car_data['vin']}",
-        f"Пробег: {car_data['mileage']:,} км".replace(",", " "),
-    ]
-
-    x_positions = [70, 800]
-
-    for index, text in enumerate(info):
-        col = index % 2
-        row = index // 2
-
-        x = x_positions[col]
-        yy = y + row * 55
-
-        draw.text(
-            (x, yy),
-            text,
-            font=small_font,
-            fill=(65, 65, 70)
-        )
-
-    # ======================================
-    # ОБЛАСТЬ АВТОМОБИЛЯ
-    # ======================================
-
-    car_left = 560
-    car_right = 1040
-    car_top = 570
-    car_bottom = 1590
-
-    # тень
     draw.rounded_rectangle(
-        [car_left + 12, car_top + 12,
-         car_right + 12, car_bottom + 12],
-        radius=150,
-        fill=(220, 220, 218)
+        [car_x1, car_y1, car_x2, car_y2],
+        radius=130,
+        fill=(48, 53, 57),
+        outline=(170, 175, 180),
+        width=6
     )
 
-    # кузов
+    # Hood
     draw.rounded_rectangle(
-        [car_left, car_top, car_right, car_bottom],
-        radius=150,
-        fill=(225, 227, 230),
-        outline=(70, 72, 76),
-        width=5
-    )
-
-    # капот
-    draw.rounded_rectangle(
-        [car_left + 45, car_top + 45,
-         car_right - 45, car_top + 300],
-        radius=70,
-        fill=(205, 208, 212),
-        outline=(100, 102, 106),
-        width=3
-    )
-
-    # багажник
-    draw.rounded_rectangle(
-        [car_left + 45, car_bottom - 300,
-         car_right - 45, car_bottom - 45],
-        radius=70,
-        fill=(205, 208, 212),
-        outline=(100, 102, 106),
-        width=3
-    )
-
-    # салон
-    draw.rounded_rectangle(
-        [car_left + 75, car_top + 300,
-         car_right - 75, car_bottom - 300],
-        radius=95,
-        fill=(48, 51, 55),
-        outline=(80, 82, 85),
+        [615, 270, 985, 455],
+        radius=65,
+        fill=(58, 63, 67),
+        outline=(120, 125, 130),
         width=4
     )
 
-    # переднее стекло
-    draw.polygon(
-        [
-            (car_left + 105, car_top + 325),
-            (car_right - 105, car_top + 325),
-            (car_right - 125, car_top + 490),
-            (car_left + 125, car_top + 490),
-        ],
-        fill=(115, 132, 145)
+    # Roof
+    draw.rounded_rectangle(
+        [625, 420, 975, 780],
+        radius=75,
+        fill=(32, 38, 43),
+        outline=(105, 110, 115),
+        width=4
     )
 
-    # заднее стекло
+    # Front windshield
     draw.polygon(
-        [
-            (car_left + 125, car_bottom - 490),
-            (car_right - 125, car_bottom - 490),
-            (car_right - 105, car_bottom - 325),
-            (car_left + 105, car_bottom - 325),
-        ],
-        fill=(115, 132, 145)
+        [(650, 440), (950, 440), (915, 555), (685, 555)],
+        fill=(28, 45, 52),
+        outline=(100, 110, 115)
     )
 
-    # центральная линия
+    # Rear windshield
+    draw.polygon(
+        [(685, 650), (915, 650), (950, 755), (650, 755)],
+        fill=(28, 45, 52),
+        outline=(100, 110, 115)
+    )
+
+    # Trunk
+    draw.rounded_rectangle(
+        [615, 780, 985, 1050],
+        radius=65,
+        fill=(58, 63, 67),
+        outline=(120, 125, 130),
+        width=4
+    )
+
+    # Wheels
+    for y in [380, 875]:
+        draw.rounded_rectangle(
+            [520, y, 590, y + 160],
+            radius=30,
+            fill=(8, 9, 10)
+        )
+
+        draw.rounded_rectangle(
+            [1010, y, 1080, y + 160],
+            radius=30,
+            fill=(8, 9, 10)
+        )
+
+    # Body center line
     draw.line(
-        [
-            ((car_left + car_right) // 2, car_top + 500),
-            ((car_left + car_right) // 2, car_bottom - 500)
-        ],
-        fill=(105, 107, 111),
+        [(800, 250), (800, 1050)],
+        fill=(100, 105, 110),
         width=3
     )
 
-    # колёса
-    wheel_positions = [
-        (car_left - 25, car_top + 355),
-        (car_right - 5, car_top + 355),
-        (car_left - 25, car_bottom - 355),
-        (car_right - 5, car_bottom - 355),
-    ]
-
-    for wx, wy in wheel_positions:
-        draw.rounded_rectangle(
-            [wx, wy, wx + 30, wy + 155],
-            radius=14,
-            fill=(30, 31, 33)
-        )
-
-    # ======================================
-    # ПОДПИСИ ДЕТАЛЕЙ И СТРЕЛКИ
-    # ======================================
-
-    label_positions = {
-        "hood": (80, 640),
-        "roof": (80, 880),
-        "trunk": (80, 1270),
-
-        "fl_fender": (80, 730),
-        "fl_door": (80, 1030),
-        "rl_door": (80, 1150),
-        "rl_fender": (80, 1370),
-
-        "fr_fender": (1110, 730),
-        "fr_door": (1110, 1030),
-        "rr_door": (1110, 1150),
-        "rr_fender": (1110, 1370),
-    }
-
-    arrow_targets = {
-        "hood": (650, 680),
-        "roof": (800, 900),
-        "trunk": (650, 1490),
-
-        "fl_fender": (570, 780),
-        "fl_door": (590, 1050),
-        "rl_door": (590, 1180),
-        "rl_fender": (570, 1350),
-
-        "fr_fender": (1030, 780),
-        "fr_door": (1010, 1050),
-        "rr_door": (1010, 1180),
-        "rr_fender": (1030, 1350),
-    }
-
-    part_names = {key: name for name, key in LKP_PARTS}
-
-    for key, (x, yy) in label_positions.items():
-
-        value = measurements.get(key, "—")
-
+    # Label helper
+    def label_box(x, y, text, value):
         box_w = 390
-        box_h = 82
+        box_h = 92
 
         draw.rounded_rectangle(
-            [x, yy, x + box_w, yy + box_h],
-            radius=14,
-            fill=(255, 255, 255),
-            outline=(195, 196, 198),
-            width=2
+            [x, y, x + box_w, y + box_h],
+            radius=18,
+            fill=(22, 26, 29),
+            outline=(70, 190, 130),
+            width=3
         )
 
         draw.text(
-            (x + 18, yy + 12),
-            part_names[key],
+            (x + 18, y + 12),
+            text,
             font=label_font,
-            fill=(35, 35, 38)
+            fill=(245, 245, 245)
         )
 
         draw.text(
-            (x + box_w - 105, yy + 13),
-            f"{value} мкм",
+            (x + 18, y + 51),
+            f"{value} µm",
             font=value_font,
-            fill=(25, 25, 28)
+            fill=(70, 190, 130)
         )
 
-        target = arrow_targets[key]
+    # Coordinates for labels
+    positions = {
+        "Капот": (60, 250, (615, 360)),
+        "Крыша": (60, 520, (625, 600)),
+        "Крышка багажника": (60, 790, (615, 930)),
 
-        if x < car_left:
-            start = (x + box_w, yy + box_h // 2)
+        "Переднее левое крыло": (60, 1010, (560, 450)),
+        "Передняя левая дверь": (60, 1120, (625, 520)),
+
+        "Заднее левое крыло": (1140, 1010, (1040, 950)),
+        "Задняя левая дверь": (1140, 900, (975, 680)),
+
+        "Переднее правое крыло": (1140, 250, (1040, 450)),
+        "Передняя правая дверь": (1140, 520, (975, 520)),
+        "Задняя правая дверь": (1140, 650, (975, 700)),
+        "Заднее правое крыло": (1140, 790, (1040, 930)),
+    }
+
+    for part, value in measurements.items():
+        if part not in positions:
+            continue
+
+        x, y, target = positions[part]
+
+        label_box(x, y, part, value)
+
+        if x < width // 2:
+            start = (x + 390, y + 46)
         else:
-            start = (x, yy + box_h // 2)
+            start = (x, y + 46)
 
         draw_arrow(draw, start, target)
 
-    # ======================================
-    # ЛЕГЕНДА
-    # ======================================
-
-    legend_y = 1690
-
-    draw.line(
-        [(70, legend_y), (1530, legend_y)],
-        fill=(205, 205, 205),
-        width=2
-    )
-
+    # Footer
     draw.text(
-        (70, legend_y + 35),
-        "ЛКП измеряется в микрометрах (мкм)",
-        font=small_font,
-        fill=(70, 70, 75)
-    )
-
-    draw.text(
-        (70, legend_y + 85),
-        "Значения указаны по результатам фактических измерений.",
-        font=small_font,
-        fill=(100, 100, 105)
-    )
-
-    draw.text(
-        (70, 1990),
-        "ЮРМАКС",
-        font=section_font,
-        fill=(35, 36, 39)
-    )
-
-    draw.text(
-        (70, 2045),
-        "Карта ЛКП • Акт осмотра автомобиля",
-        font=small_font,
-        fill=(100, 100, 105)
+        (60, 1270),
+        "Измерения ЛКП указаны в микрометрах (µm)",
+        font=subtitle_font,
+        fill=(180, 185, 190)
     )
 
     output = BytesIO()
-
-    image.save(
-        output,
-        format="PNG",
-        optimize=True
-    )
-
+    img.save(output, format="PNG")
     output.seek(0)
 
     return output
 
 
-# ==========================================
+# =========================================================
+# PDF HEADER / FOOTER
+# =========================================================
+
+def pdf_header_footer(canvas, doc):
+    canvas.saveState()
+
+    width, height = A4
+
+    # Header
+    canvas.setFillColor(colors.HexColor("#101416"))
+    canvas.rect(0, height - 20 * mm, width, 20 * mm, fill=1, stroke=0)
+
+    canvas.setFont("DejaVuBold", 15)
+    canvas.setFillColor(colors.white)
+    canvas.drawString(
+        15 * mm,
+        height - 13 * mm,
+        "ЮРМАКС"
+    )
+
+    canvas.setFont("DejaVu", 8)
+    canvas.setFillColor(colors.HexColor("#46BE82"))
+    canvas.drawRightString(
+        width - 15 * mm,
+        height - 13 * mm,
+        "АКТ ОСМОТРА АВТОМОБИЛЯ"
+    )
+
+    # Footer
+    canvas.setFillColor(colors.HexColor("#777777"))
+    canvas.setFont("DejaVu", 8)
+
+    canvas.drawString(
+        15 * mm,
+        10 * mm,
+        "ЮРМАКС"
+    )
+
+    canvas.drawRightString(
+        width - 15 * mm,
+        10 * mm,
+        f"Страница {doc.page}"
+    )
+
+    canvas.restoreState()
+
+
+# =========================================================
+# PDF TABLE
+# =========================================================
+
+def make_equipment_table(category, options):
+    data = [
+        [
+            Paragraph(
+                "ОПЦИЯ",
+                ParagraphStyle(
+                    "head",
+                    fontName="DejaVuBold",
+                    fontSize=9,
+                    textColor=colors.white,
+                    alignment=TA_LEFT,
+                )
+            ),
+            Paragraph(
+                "РЕЗУЛЬТАТ",
+                ParagraphStyle(
+                    "head2",
+                    fontName="DejaVuBold",
+                    fontSize=9,
+                    textColor=colors.white,
+                    alignment=TA_LEFT,
+                )
+            ),
+        ]
+    ]
+
+    body_style = ParagraphStyle(
+        "body",
+        fontName="DejaVu",
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#202426"),
+    )
+
+    result_style = ParagraphStyle(
+        "result",
+        fontName="DejaVu",
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#555555"),
+    )
+
+    for option in options:
+        data.append([
+            Paragraph(option, body_style),
+            Paragraph("Не определено", result_style)
+        ])
+
+    table = Table(
+        data,
+        colWidths=[105 * mm, 65 * mm],
+        repeatRows=1
+    )
+
+    table.setStyle(
+        TableStyle([
+            (
+                "BACKGROUND",
+                (0, 0),
+                (-1, 0),
+                colors.HexColor("#15191B")
+            ),
+            (
+                "GRID",
+                (0, 0),
+                (-1, -1),
+                0.35,
+                colors.HexColor("#D7DADD")
+            ),
+            (
+                "VALIGN",
+                (0, 0),
+                (-1, -1),
+                "MIDDLE"
+            ),
+            (
+                "LEFTPADDING",
+                (0, 0),
+                (-1, -1),
+                7
+            ),
+            (
+                "RIGHTPADDING",
+                (0, 0),
+                (-1, -1),
+                7
+            ),
+            (
+                "TOPPADDING",
+                (0, 0),
+                (-1, -1),
+                5
+            ),
+            (
+                "BOTTOMPADDING",
+                (0, 0),
+                (-1, -1),
+                5
+            ),
+        ])
+    )
+
+    return table
+
+
+# =========================================================
+# CREATE PDF
+# =========================================================
+
+def create_pdf(car_data, measurements):
+    output = BytesIO()
+
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        rightMargin=15 * mm,
+        leftMargin=15 * mm,
+        topMargin=27 * mm,
+        bottomMargin=18 * mm,
+        title="ЮРМАКС — Акт осмотра автомобиля",
+        author="ЮРМАКС",
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "TitleCustom",
+        parent=styles["Title"],
+        fontName="DejaVuBold",
+        fontSize=24,
+        leading=29,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#15191B"),
+        spaceAfter=8,
+    )
+
+    subtitle_style = ParagraphStyle(
+        "SubtitleCustom",
+        parent=styles["Normal"],
+        fontName="DejaVu",
+        fontSize=11,
+        leading=15,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#555B60"),
+        spaceAfter=20,
+    )
+
+    section_style = ParagraphStyle(
+        "SectionCustom",
+        parent=styles["Heading2"],
+        fontName="DejaVuBold",
+        fontSize=15,
+        leading=19,
+        textColor=colors.HexColor("#15191B"),
+        spaceBefore=5,
+        spaceAfter=10,
+    )
+
+    normal_style = ParagraphStyle(
+        "NormalCustom",
+        parent=styles["Normal"],
+        fontName="DejaVu",
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#25292B"),
+    )
+
+    story = []
+
+    # -----------------------------------------------------
+    # TITLE
+    # -----------------------------------------------------
+
+    story.append(Spacer(1, 15 * mm))
+
+    story.append(
+        Paragraph(
+            "ЮРМАКС",
+            ParagraphStyle(
+                "Brand",
+                fontName="DejaVuBold",
+                fontSize=30,
+                alignment=TA_CENTER,
+                textColor=colors.HexColor("#46BE82"),
+                spaceAfter=5,
+            )
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "АКТ ОСМОТРА АВТОМОБИЛЯ",
+            title_style
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "Профессиональный отчёт осмотра",
+            subtitle_style
+        )
+    )
+
+    # -----------------------------------------------------
+    # CAR DATA
+    # -----------------------------------------------------
+
+    story.append(
+        Paragraph(
+            "ДАННЫЕ АВТОМОБИЛЯ",
+            section_style
+        )
+    )
+
+    car_table_data = [
+        ["Марка", car_data["make"]],
+        ["Модель", car_data["model"]],
+        ["Год выпуска", car_data["year"]],
+        ["VIN", car_data["vin"]],
+        ["Пробег", f'{car_data["mileage"]} км'],
+    ]
+
+    car_table = Table(
+        car_table_data,
+        colWidths=[50 * mm, 120 * mm]
+    )
+
+    car_table.setStyle(
+        TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D7DADD")),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F0F2F3")),
+            ("FONTNAME", (0, 0), (0, -1), "DejaVuBold"),
+            ("FONTNAME", (1, 0), (1, -1), "DejaVu"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ])
+    )
+
+    story.append(car_table)
+    story.append(Spacer(1, 12 * mm))
+
+    # -----------------------------------------------------
+    # LKP
+    # -----------------------------------------------------
+
+    story.append(PageBreak())
+
+    story.append(
+        Paragraph(
+            "КАРТА ЛАКОКРАСОЧНОГО ПОКРЫТИЯ",
+            section_style
+        )
+    )
+
+    lkp_image = make_lkp_map(measurements)
+
+    story.append(
+        RLImage(
+            lkp_image,
+            width=180 * mm,
+            height=151.8 * mm
+        )
+    )
+
+    story.append(Spacer(1, 5 * mm))
+
+    story.append(
+        Paragraph(
+            "Все значения указаны в микрометрах (µm).",
+            normal_style
+        )
+    )
+
+    # -----------------------------------------------------
+    # EQUIPMENT
+    # -----------------------------------------------------
+
+    story.append(PageBreak())
+
+    story.append(
+        Paragraph(
+            "КОМПЛЕКТАЦИЯ И ОСНАЩЕНИЕ",
+            title_style
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "Перечень оборудования автомобиля",
+            subtitle_style
+        )
+    )
+
+    for category, options in EQUIPMENT.items():
+
+        story.append(
+            Paragraph(
+                category,
+                section_style
+            )
+        )
+
+        story.append(
+            make_equipment_table(category, options)
+        )
+
+        story.append(Spacer(1, 8 * mm))
+
+    doc.build(
+        story,
+        onFirstPage=pdf_header_footer,
+        onLaterPages=pdf_header_footer
+    )
+
+    output.seek(0)
+    return output
+
+
+# =========================================================
 # START
-# ==========================================
+# =========================================================
 
 @dp.message(CommandStart())
-async def start(message: types.Message, state: FSMContext):
+async def start_handler(message: types.Message, state: FSMContext):
     await state.clear()
 
     await message.answer(
-        "Добро пожаловать!\n\n"
-        "ЮРМАКС — создание фотоотчётов осмотра автомобилей.\n\n"
-        "Нажмите «Создать акт», чтобы начать.",
-        reply_markup=main_menu
+        "Добро пожаловать в ЮРМАКС.\n\n"
+        "Здесь можно сформировать акт осмотра автомобиля.",
+        reply_markup=main_keyboard
     )
 
 
-# ==========================================
-# СОЗДАТЬ АКТ
-# ==========================================
+# =========================================================
+# CREATE ACT
+# =========================================================
 
-@dp.message(lambda message: message.text == "Создать акт")
-async def create_act(message: types.Message, state: FSMContext):
+@dp.message(F.text == "Создать акт")
+async def create_handler(message: types.Message, state: FSMContext):
     await state.clear()
+
     await state.set_state(InspectionForm.make)
 
     await message.answer(
-        "Создаём новый акт осмотра.\n\n"
-        "Шаг 1 из 5\n\n"
-        "Введите марку автомобиля:"
+        "Введите марку автомобиля.\n\n"
+        "Например: BMW"
     )
 
 
-# ==========================================
-# МАРКА
-# ==========================================
+# =========================================================
+# MAKE
+# =========================================================
 
 @dp.message(InspectionForm.make)
-async def get_make(message: types.Message, state: FSMContext):
-    text = (message.text or "").strip()
+async def make_handler(message: types.Message, state: FSMContext):
+    await state.update_data(make=message.text.strip())
 
-    if not text:
-        await message.answer("Введите марку автомобиля.")
-        return
-
-    await state.update_data(make=text)
     await state.set_state(InspectionForm.model)
 
     await message.answer(
-        "Шаг 2 из 5\n\n"
-        "Введите модель автомобиля:"
+        "Введите модель автомобиля.\n\n"
+        "Например: X5"
     )
 
 
-# ==========================================
-# МОДЕЛЬ
-# ==========================================
+# =========================================================
+# MODEL
+# =========================================================
 
 @dp.message(InspectionForm.model)
-async def get_model(message: types.Message, state: FSMContext):
-    text = (message.text or "").strip()
+async def model_handler(message: types.Message, state: FSMContext):
+    await state.update_data(model=message.text.strip())
 
-    if not text:
-        await message.answer("Введите модель автомобиля.")
-        return
-
-    await state.update_data(model=text)
     await state.set_state(InspectionForm.year)
 
     await message.answer(
-        "Шаг 3 из 5\n\n"
-        "Введите год выпуска:"
+        "Введите год выпуска.\n\n"
+        "Например: 2021"
     )
 
 
-# ==========================================
-# ГОД
-# ==========================================
+# =========================================================
+# YEAR
+# =========================================================
 
 @dp.message(InspectionForm.year)
-async def get_year(message: types.Message, state: FSMContext):
-    text = (message.text or "").strip()
+async def year_handler(message: types.Message, state: FSMContext):
 
-    if not text.isdigit():
-        await message.answer("Введите год цифрами, например: 2021")
+    value = message.text.strip()
+
+    if not value.isdigit():
+        await message.answer("Введите год цифрами. Например: 2021")
         return
 
-    year = int(text)
+    await state.update_data(year=value)
 
-    if year < 1900 or year > 2100:
-        await message.answer("Введите корректный год.")
-        return
-
-    await state.update_data(year=year)
     await state.set_state(InspectionForm.vin)
 
     await message.answer(
-        "Шаг 4 из 5\n\n"
-        "Введите VIN автомобиля:"
+        "Введите VIN автомобиля."
     )
 
 
-# ==========================================
+# =========================================================
 # VIN
-# ==========================================
+# =========================================================
 
 @dp.message(InspectionForm.vin)
-async def get_vin(message: types.Message, state: FSMContext):
-    vin = (message.text or "").strip().upper()
+async def vin_handler(message: types.Message, state: FSMContext):
+    await state.update_data(vin=message.text.strip())
 
-    if len(vin) != 17:
-        await message.answer(
-            "VIN должен содержать 17 символов.\n"
-            "Проверьте VIN и отправьте его ещё раз."
-        )
-        return
-
-    await state.update_data(vin=vin)
     await state.set_state(InspectionForm.mileage)
 
     await message.answer(
-        "Шаг 5 из 5\n\n"
-        "Введите пробег в километрах.\n\n"
-        "Например: 125000"
+        "Введите пробег автомобиля в километрах.\n\n"
+        "Например: 124500"
     )
 
 
-# ==========================================
-# ПРОБЕГ
-# ==========================================
+# =========================================================
+# MILEAGE
+# =========================================================
 
 @dp.message(InspectionForm.mileage)
-async def get_mileage(message: types.Message, state: FSMContext):
-    text = (message.text or "").strip().replace(" ", "")
+async def mileage_handler(message: types.Message, state: FSMContext):
 
-    if not text.isdigit():
+    value = message.text.strip()
+
+    if not value.isdigit():
         await message.answer(
-            "Введите пробег цифрами.\n"
-            "Например: 125000"
+            "Введите пробег только цифрами.\n\n"
+            "Например: 124500"
         )
         return
 
-    mileage = int(text)
-
-    await state.update_data(mileage=mileage)
-
-    data = await state.get_data()
-
-    await state.set_state(InspectionForm.lkp)
+    await state.update_data(mileage=value)
 
     await state.update_data(
         lkp_index=0,
         measurements={}
     )
 
-    first_part = LKP_PARTS[0][0]
+    await state.set_state(InspectionForm.lkp)
 
     await message.answer(
-        "Данные автомобиля сохранены.\n\n"
-        "Теперь заполним карту ЛКП.\n\n"
-        f"Измерьте деталь:\n"
-        f"{first_part}\n\n"
-        "Введите значение в мкм.\n"
-        "Например: 145"
+        f"Введите толщину ЛКП.\n\n"
+        f"Деталь: {LKP_PARTS[0]}\n\n"
+        f"Например: 145"
     )
 
 
-# ==========================================
-# ЛКП
-# ==========================================
+# =========================================================
+# LKP
+# =========================================================
 
 @dp.message(InspectionForm.lkp)
-async def get_lkp(message: types.Message, state: FSMContext):
-    text = (message.text or "").strip()
+async def lkp_handler(message: types.Message, state: FSMContext):
 
-    if not text.isdigit():
+    value = message.text.strip()
+
+    if not value.isdigit():
         await message.answer(
-            "Введите значение ЛКП только цифрами.\n\n"
+            "Введите значение цифрами.\n\n"
             "Например: 145"
         )
         return
 
-    value = int(text)
+    measurement = int(value)
 
-    if value < 1 or value > 5000:
+    if measurement < 1 or measurement > 5000:
         await message.answer(
-            "Введите значение от 1 до 5000 мкм."
+            "Введите значение от 1 до 5000 µm."
         )
         return
 
     data = await state.get_data()
 
-    index = data.get("lkp_index", 0)
-    measurements = data.get("measurements", {})
+    index = data["lkp_index"]
+    measurements = data["measurements"]
 
-    part_name, part_key = LKP_PARTS[index]
+    current_part = LKP_PARTS[index]
 
-    measurements[part_key] = value
+    measurements[current_part] = measurement
 
     next_index = index + 1
 
     if next_index < len(LKP_PARTS):
+
         await state.update_data(
             lkp_index=next_index,
             measurements=measurements
         )
 
-        next_part = LKP_PARTS[next_index][0]
-
         await message.answer(
-            f"Сохранено: {part_name} — {value} мкм\n\n"
-            f"Следующая деталь:\n"
-            f"{next_part}\n\n"
-            "Введите значение в мкм:"
+            f"Принято: {current_part} — {measurement} µm\n\n"
+            f"Теперь введите значение для:\n"
+            f"{LKP_PARTS[next_index]}"
         )
 
         return
 
-    # ======================================
-    # ВСЕ ИЗМЕРЕНИЯ ГОТОВЫ
-    # ======================================
+    # -----------------------------------------------------
+    # ALL MEASUREMENTS RECEIVED
+    # -----------------------------------------------------
 
     car_data = {
         "make": data["make"],
@@ -670,53 +1100,60 @@ async def get_lkp(message: types.Message, state: FSMContext):
     }
 
     await message.answer(
-        "Все значения ЛКП получены.\n\n"
-        "Формирую графическую карту ЮРМАКС..."
+        "Все замеры получены.\n\n"
+        "Формирую PDF-отчёт ЮРМАКС..."
     )
 
-    report = make_lkp_report(
-        car_data,
-        measurements
-    )
-
-    await message.answer_photo(
-        types.BufferedInputFile(
-            report.read(),
-            filename="yurmax_lkp_map.png"
-        ),
-        caption=(
-            "ЮРМАКС\n"
-            "Карта лакокрасочного покрытия\n\n"
-            "Значения нанесены по введённым результатам измерений."
+    try:
+        pdf = create_pdf(
+            car_data,
+            measurements
         )
-    )
+
+        await message.answer_document(
+            types.BufferedInputFile(
+                pdf.read(),
+                filename="YURMAX_AKT_OSMOTRA.pdf"
+            )
+        )
+
+        await message.answer(
+            "Готово.\n\n"
+            "PDF-отчёт сформирован.",
+            reply_markup=main_keyboard
+        )
+
+    except Exception as e:
+        print("PDF ERROR:", repr(e))
+
+        await message.answer(
+            "Не удалось сформировать PDF.\n\n"
+            "Проверьте логи Render."
+        )
 
     await state.clear()
 
-    await message.answer(
-        "Карта ЛКП готова.\n\n"
-        "Следующим этапом можем добавить загрузку фотографий автомобиля "
-        "и собрать из карты ЛКП + фотографий полноценный многостраничный "
-        "фотоотчёт.",
-        reply_markup=main_menu
+
+# =========================================================
+# HEALTH SERVER FOR RENDER
+# =========================================================
+
+async def health(request):
+    return web.Response(
+        text="YURMAX BOT OK"
     )
 
 
-# ==========================================
-# WEB-СЕРВЕР RENDER
-# ==========================================
-
-async def health(request):
-    return web.Response(text="OK")
-
-
-async def run_web_server():
+async def start_web_server():
     app = web.Application()
 
-    app.router.add_get("/", health)
-    app.router.add_get("/health", health)
+    app.router.add_get(
+        "/",
+        health
+    )
 
     runner = web.AppRunner(app)
+
     await runner.setup()
 
     site = web.TCPSite(
@@ -729,30 +1166,19 @@ async def run_web_server():
 
     print(f"Web server started on port {PORT}")
 
-    return runner
 
-
-# ==========================================
-# ЗАПУСК
-# ==========================================
+# =========================================================
+# MAIN
+# =========================================================
 
 async def main():
-    if not TOKEN:
-        raise RuntimeError("BOT_TOKEN не найден")
 
-    bot = Bot(token=TOKEN)
+    await start_web_server()
 
-    runner = await run_web_server()
+    print("YURMAX BOT STARTED")
 
-    try:
-        print("Telegram bot started")
-        await dp.start_polling(bot)
-
-    finally:
-        await runner.cleanup()
-        await bot.session.close()
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-    

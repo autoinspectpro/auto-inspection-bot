@@ -75,6 +75,7 @@ class InspectionForm(StatesGroup):
     body_type = State()
     body_color = State()
     wheel_radius = State()
+    drive = State()
     paint_type = State()
     display_size = State()
 
@@ -1613,6 +1614,11 @@ def create_pdf(
         ],
 
         [
+            "ПРИВОД",
+            car_data["drive"]
+        ],
+
+        [
             "ТИП ДВИГАТЕЛЯ",
             car_data["engine_type"]
         ],
@@ -2409,6 +2415,9 @@ async def generate_and_send_report(
             "wheel_radius":
                 data["wheel_radius"],
 
+            "drive":
+                data["drive"],
+
             "engine_type":
                 data["engine_type"],
 
@@ -2961,8 +2970,34 @@ async def wheel_radius_handler(
         wheel_radius=value
     )
 
-    await state.set_state(InspectionForm.paint_type)
+    await state.set_state(InspectionForm.drive)
 
+    await message.answer(
+        "Введите привод автомобиля.\\n\\n"
+        "Например: Передний / Задний / 4х4 / Полный привод"
+    )
+
+    await message.answer(
+        "Введите тип лакокрасочного покрытия.\\n\\n"
+        "Например: Металлик / Перламутр / Обычное покрытие"
+    )
+
+
+# =========================================================
+# ПРИВОД
+# =========================================================
+
+@dp.message(InspectionForm.drive)
+async def drive_handler(message: types.Message, state: FSMContext):
+
+    value = (message.text or "").strip()
+
+    if not value:
+        await message.answer("Введите привод автомобиля.")
+        return
+
+    await state.update_data(drive=value)
+    await state.set_state(InspectionForm.paint_type)
     await message.answer(
         "Введите тип лакокрасочного покрытия.\\n\\n"
         "Например: Металлик / Перламутр / Обычное покрытие"

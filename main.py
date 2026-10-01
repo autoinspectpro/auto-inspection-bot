@@ -1,14 +1,19 @@
 import os
 import asyncio
+import json
+import sqlite3
+import uuid
 from io import BytesIO
 from datetime import datetime
+from typing import Any, Mapping
 
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.base import BaseStorage, StorageKey, StateType
 from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
@@ -44,8 +49,354 @@ from reportlab.pdfbase.ttfonts import TTFont
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
+# Для Render рекомендуется задать:
+# YURMAX_DB_PATH=/var/data/yurmax_bot.db
+#
+# Если переменная не задана — база будет создана рядом с main.py.
+DB_PATH = os.getenv(
+    "YURMAX_DB_PATH",
+    "yurmax_bot.db"
+)
+
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
+
+
+# =========================================================
+# SQLITE PERSISTENT FSM
+# =========================================================
+
+class SQLiteStorage(BaseStorage):
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+
+        directory = os.path.dirname(
+            os.path.abspath(db_path)
+        )
+
+        os.makedirs(
+            directory,
+            exist_ok=True
+        )
+
+        self._init_db()
+
+    def _connect(self):
+        connection = sqlite3.connect(
+            self.db_path,
+            timeout=30,
+            check_same_thread=False
+        )
+
+        connection.execute(
+            "PRAGMA journal_mode=WAL"
+        )
+
+        connection.execute(
+            "PRAGMA busy_timeout=30000"
+        )
+
+        return connection
+
+    def _init_db(self):
+
+        connection = self._connect()
+
+        try:
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fsm_storage (
+                    storage_key TEXT PRIMARY KEY,
+                    state TEXT,
+                    data TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+            connection.commit()
+
+        finally:
+
+            connection.close()
+
+    @staticmethod
+    def _make_key(
+        key: StorageKey
+    ) -> str:
+
+        return json.dumps(
+            {
+                "bot_id": key.bot_id,
+                "chat_id": key.chat_id,
+                "user_id": key.user_id,
+                "thread_id": key.thread_id,
+                "business_connection_id":
+                    key.business_connection_id,
+                "destiny": key.destiny,
+            },
+            sort_keys=True,
+            ensure_ascii=False
+        )
+
+    @staticmethod
+    def _resolve_state(
+        state: StateType
+    ):
+
+        if state is None:
+            return None
+
+        if isinstance(state, State):
+            return state.state
+
+        return str(state)
+
+    async def set_state(
+        self,
+        key: StorageKey,
+        state: StateType = None
+    ) -> None:
+
+        storage_key = self._make_key(key)
+        resolved_state = self._resolve_state(state)
+
+        connection = self._connect()
+
+        try:
+
+            cursor = connection.execute(
+                """
+                SELECT data
+                FROM fsm_storage
+                WHERE storage_key = ?
+                """,
+                (storage_key,)
+            )
+
+            row = cursor.fetchone()
+
+            now = datetime.utcnow().isoformat()
+
+            if row:
+
+                connection.execute(
+                    """
+                    UPDATE fsm_storage
+                    SET state = ?,
+                        updated_at = ?
+                    WHERE storage_key = ?
+                    """,
+                    (
+                        resolved_state,
+                        now,
+                        storage_key
+                    )
+                )
+
+            else:
+
+                connection.execute(
+                    """
+                    INSERT INTO fsm_storage
+                    (
+                        storage_key,
+                        state,
+                        data,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        storage_key,
+                        resolved_state,
+                        "{}",
+                        now
+                    )
+                )
+
+            connection.commit()
+
+        finally:
+
+            connection.close()
+
+    async def get_state(
+        self,
+        key: StorageKey
+    ):
+
+        storage_key = self._make_key(key)
+
+        connection = self._connect()
+
+        try:
+
+            cursor = connection.execute(
+                """
+                SELECT state
+                FROM fsm_storage
+                WHERE storage_key = ?
+                """,
+                (storage_key,)
+            )
+
+            row = cursor.fetchone()
+
+            if not row:
+                return None
+
+            return row[0]
+
+        finally:
+
+            connection.close()
+
+    async def set_data(
+        self,
+        key: StorageKey,
+        data: Mapping[str, Any]
+    ) -> None:
+
+        if not isinstance(data, Mapping):
+            raise TypeError(
+                "FSM data must be a mapping"
+            )
+
+        storage_key = self._make_key(key)
+
+        serialized = json.dumps(
+            dict(data),
+            ensure_ascii=False
+        )
+
+        connection = self._connect()
+
+        try:
+
+            cursor = connection.execute(
+                """
+                SELECT state
+                FROM fsm_storage
+                WHERE storage_key = ?
+                """,
+                (storage_key,)
+            )
+
+            row = cursor.fetchone()
+
+            now = datetime.utcnow().isoformat()
+
+            if row:
+
+                connection.execute(
+                    """
+                    UPDATE fsm_storage
+                    SET data = ?,
+                        updated_at = ?
+                    WHERE storage_key = ?
+                    """,
+                    (
+                        serialized,
+                        now,
+                        storage_key
+                    )
+                )
+
+            else:
+
+                connection.execute(
+                    """
+                    INSERT INTO fsm_storage
+                    (
+                        storage_key,
+                        state,
+                        data,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        storage_key,
+                        None,
+                        serialized,
+                        now
+                    )
+                )
+
+            connection.commit()
+
+        finally:
+
+            connection.close()
+
+    async def get_data(
+        self,
+        key: StorageKey
+    ) -> dict:
+
+        storage_key = self._make_key(key)
+
+        connection = self._connect()
+
+        try:
+
+            cursor = connection.execute(
+                """
+                SELECT data
+                FROM fsm_storage
+                WHERE storage_key = ?
+                """,
+                (storage_key,)
+            )
+
+            row = cursor.fetchone()
+
+            if not row or not row[0]:
+                return {}
+
+            try:
+
+                data = json.loads(
+                    row[0]
+                )
+
+                if isinstance(data, dict):
+                    return data
+
+            except Exception:
+
+                pass
+
+            return {}
+
+        finally:
+
+            connection.close()
+
+    async def update_data(
+        self,
+        key: StorageKey,
+        data: Mapping[str, Any]
+    ) -> dict:
+
+        current = await self.get_data(key)
+
+        current.update(
+            dict(data)
+        )
+
+        await self.set_data(
+            key,
+            current
+        )
+
+        return current.copy()
+
+    async def close(self) -> None:
+        pass
 
 
 # =========================================================
@@ -54,7 +405,11 @@ if not TOKEN:
 
 bot = Bot(TOKEN)
 
-dp = Dispatcher()
+dp = Dispatcher(
+    storage=SQLiteStorage(
+        DB_PATH
+    )
+)
 
 
 # =========================================================
@@ -105,6 +460,20 @@ class InspectionForm(StatesGroup):
     endoscopy_oil = State()
     endoscopy_overall = State()
 
+    review = State()
+    edit_menu = State()
+
+
+# =========================================================
+# ТЕКСТЫ КНОПОК
+# =========================================================
+
+BACK_TEXT = "⬅️ Назад"
+MENU_TEXT = "🏠 Меню"
+CREATE_TEXT = "Создать акт"
+CONTINUE_TEXT = "▶️ Продолжить акт"
+NEW_TEXT = "🆕 Новый акт"
+
 
 # =========================================================
 # КЛАВИАТУРЫ
@@ -113,7 +482,29 @@ class InspectionForm(StatesGroup):
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [
-            KeyboardButton(text="Создать акт")
+            KeyboardButton(
+                text=CREATE_TEXT
+            )
+        ],
+        [
+            KeyboardButton(
+                text=CONTINUE_TEXT
+            )
+        ]
+    ],
+    resize_keyboard=True
+)
+
+
+back_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(
+                text=BACK_TEXT
+            ),
+            KeyboardButton(
+                text=MENU_TEXT
+            )
         ]
     ],
     resize_keyboard=True
@@ -129,10 +520,13 @@ engine_keyboard = ReplyKeyboardMarkup(
         [
             KeyboardButton(text="Гибрид"),
             KeyboardButton(text="Электро")
+        ],
+        [
+            KeyboardButton(text=BACK_TEXT),
+            KeyboardButton(text=MENU_TEXT)
         ]
     ],
-    resize_keyboard=True,
-    one_time_keyboard=True
+    resize_keyboard=True
 )
 
 
@@ -145,17 +539,45 @@ gearbox_keyboard = ReplyKeyboardMarkup(
         [
             KeyboardButton(text="Робот"),
             KeyboardButton(text="Вариатор")
+        ],
+        [
+            KeyboardButton(text=BACK_TEXT),
+            KeyboardButton(text=MENU_TEXT)
         ]
     ],
-    resize_keyboard=True,
-    one_time_keyboard=True
+    resize_keyboard=True
 )
 
 
 finish_photos_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [
-            KeyboardButton(text="Готово")
+            KeyboardButton(
+                text="Готово"
+            )
+        ],
+        [
+            KeyboardButton(
+                text=BACK_TEXT
+            ),
+            KeyboardButton(
+                text=MENU_TEXT
+            )
+        ]
+    ],
+    resize_keyboard=True
+)
+
+
+endoscopy_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(
+                text=BACK_TEXT
+            ),
+            KeyboardButton(
+                text=MENU_TEXT
+            )
         ]
     ],
     resize_keyboard=True
@@ -163,7 +585,7 @@ finish_photos_keyboard = ReplyKeyboardMarkup(
 
 
 # =========================================================
-# КЛАВИАТУРА РУЧНОЙ КОМПЛЕКТАЦИИ
+# INLINE — РУЧНАЯ КОМПЛЕКТАЦИЯ
 # =========================================================
 
 def manual_equipment_keyboard():
@@ -184,6 +606,102 @@ def manual_equipment_keyboard():
                 InlineKeyboardButton(
                     text="Пропустить",
                     callback_data="eq_skip"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data="eq_back"
+                )
+            ]
+        ]
+    )
+
+
+# =========================================================
+# INLINE — ПОДТВЕРЖДЕНИЕ НОВОГО АКТА
+# =========================================================
+
+def new_report_confirm_keyboard():
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🆕 Начать новый",
+                    callback_data="new_confirm"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="new_cancel"
+                )
+            ]
+        ]
+    )
+
+
+# =========================================================
+# INLINE — ФИНАЛЬНЫЙ ПРОСМОТР
+# =========================================================
+
+def review_keyboard():
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✏️ Редактировать",
+                    callback_data="review_edit"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📄 Создать PDF",
+                    callback_data="review_pdf"
+                )
+            ]
+        ]
+    )
+
+
+def edit_menu_keyboard():
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚗 Данные автомобиля",
+                    callback_data="edit_car"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎨 ЛКП",
+                    callback_data="edit_lkp"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📷 Фотографии",
+                    callback_data="edit_photos"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🧰 Комплектация",
+                    callback_data="edit_equipment"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔬 Эндоскопия",
+                    callback_data="edit_endoscopy"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data="edit_back"
                 )
             ]
         ]
@@ -414,7 +932,7 @@ EQUIPMENT = {
 
 
 # =========================================================
-# СОЗДАНИЕ ПОЛНОГО СПИСКА РУЧНОЙ ПРОВЕРКИ
+# РУЧНАЯ ПРОВЕРКА КОМПЛЕКТАЦИИ
 # =========================================================
 
 def build_manual_equipment_queue():
@@ -449,10 +967,6 @@ def build_manual_equipment_queue():
 
     return queue
 
-
-# =========================================================
-# НАЧАЛЬНЫЕ РЕЗУЛЬТАТЫ КОМПЛЕКТАЦИИ
-# =========================================================
 
 def create_empty_equipment_results(
     body_type,
@@ -501,17 +1015,52 @@ def create_empty_equipment_results(
     }
 
     direct_values = {
-        ("ЭКСТЕРЬЕР", "Тип лакокрасочного покрытия"): paint_type,
-        ("МУЛЬТИМЕДИА", "Размер дисплея"): display_size,
-        ("ЭКСТЕРЬЕР", "Тип дисков"): wheel_type,
-        ("ИНТЕРЬЕР", "Материал сидений"): seat_material,
-        ("ИНТЕРЬЕР", "Цвет салона"): interior_color,
-        ("ИНТЕРЬЕР", "Количество мест"): seat_count,
-        ("МУЛЬТИМЕДИА", "Название аудиосистемы"): audio_system_name,
-        ("МУЛЬТИМЕДИА", "Количество динамиков"): speaker_count,
+        (
+            "ЭКСТЕРЬЕР",
+            "Тип лакокрасочного покрытия"
+        ): paint_type,
+
+        (
+            "МУЛЬТИМЕДИА",
+            "Размер дисплея"
+        ): display_size,
+
+        (
+            "ЭКСТЕРЬЕР",
+            "Тип дисков"
+        ): wheel_type,
+
+        (
+            "ИНТЕРЬЕР",
+            "Материал сидений"
+        ): seat_material,
+
+        (
+            "ИНТЕРЬЕР",
+            "Цвет салона"
+        ): interior_color,
+
+        (
+            "ИНТЕРЬЕР",
+            "Количество мест"
+        ): seat_count,
+
+        (
+            "МУЛЬТИМЕДИА",
+            "Название аудиосистемы"
+        ): audio_system_name,
+
+        (
+            "МУЛЬТИМЕДИА",
+            "Количество динамиков"
+        ): speaker_count,
     }
 
-    for (category, option), value in direct_values.items():
+    for (
+        category,
+        option
+    ), value in direct_values.items():
+
         results[category][option] = {
             "status": "Ручной ввод",
             "value": value,
@@ -520,10 +1069,6 @@ def create_empty_equipment_results(
 
     return results
 
-
-# =========================================================
-# СЛЕДУЮЩИЙ ВОПРОС КОМПЛЕКТАЦИИ
-# =========================================================
 
 async def ask_next_manual_equipment(
     message,
@@ -543,7 +1088,6 @@ async def ask_next_manual_equipment(
     )
 
     if index >= len(queue):
-
         return False
 
     item = queue[index]
@@ -556,9 +1100,12 @@ async def ask_next_manual_equipment(
         manual_current_option=option
     )
 
+    total = len(queue)
+
     await message.answer(
 
-        f"ПРОВЕРКА КОМПЛЕКТАЦИИ\n\n"
+        f"🧰 ПРОВЕРКА КОМПЛЕКТАЦИИ\n\n"
+        f"Позиция: {index + 1} из {total}\n"
         f"Раздел: {category}\n"
         f"Опция: {option}\n\n"
         f"Укажите результат:",
@@ -570,7 +1117,87 @@ async def ask_next_manual_equipment(
 
 
 # =========================================================
-# РЕГИСТРАЦИЯ ШРИФТОВ
+# ПРОГРЕСС
+# =========================================================
+
+FORM_STATES = [
+    InspectionForm.master_name.state,
+    InspectionForm.report_date.state,
+    InspectionForm.make.state,
+    InspectionForm.model.state,
+    InspectionForm.year.state,
+    InspectionForm.vin.state,
+    InspectionForm.mileage.state,
+    InspectionForm.body_type.state,
+    InspectionForm.body_color.state,
+    InspectionForm.wheel_radius.state,
+    InspectionForm.drive.state,
+    InspectionForm.paint_type.state,
+    InspectionForm.display_size.state,
+    InspectionForm.seat_material.state,
+    InspectionForm.wheel_type.state,
+    InspectionForm.interior_color.state,
+    InspectionForm.seat_count.state,
+    InspectionForm.audio_system_name.state,
+    InspectionForm.speaker_count.state,
+    InspectionForm.engine_type.state,
+    InspectionForm.engine_volume.state,
+    InspectionForm.engine_hp.state,
+    InspectionForm.gearbox.state,
+    InspectionForm.lkp.state,
+    InspectionForm.photos.state,
+    InspectionForm.manual_equipment.state,
+    InspectionForm.endoscopy_cylinders.state,
+    InspectionForm.endoscopy_cylinder_walls.state,
+    InspectionForm.endoscopy_pistons.state,
+    InspectionForm.endoscopy_scoring.state,
+    InspectionForm.endoscopy_carbon.state,
+    InspectionForm.endoscopy_oil.state,
+    InspectionForm.endoscopy_overall.state,
+]
+
+
+def progress_text(
+    current_state: str
+):
+
+    if current_state not in FORM_STATES:
+        return ""
+
+    index = FORM_STATES.index(
+        current_state
+    )
+
+    current = index + 1
+    total = len(FORM_STATES)
+
+    width = 12
+
+    filled = int(
+        width * current / total
+    )
+
+    filled = max(
+        1,
+        min(
+            filled,
+            width
+        )
+    )
+
+    bar = (
+        "█" * filled
+        + "░" * (width - filled)
+    )
+
+    return (
+        f"{bar}\n"
+        f"Шаг {current} из {total}"
+    )
+
+
+# =========================================================
+# ШРИФТЫ
 # =========================================================
 
 def register_fonts():
@@ -633,7 +1260,11 @@ def get_pil_font(
     bold=False
 ):
 
-    path = BOLD_FONT if bold else REGULAR_FONT
+    path = (
+        BOLD_FONT
+        if bold
+        else REGULAR_FONT
+    )
 
     return ImageFont.truetype(
         path,
@@ -1981,37 +2612,58 @@ def create_pdf(
 
             [
                 "Цилиндры",
-                endoscopy_data.get("cylinders", "—")
+                endoscopy_data.get(
+                    "cylinders",
+                    "—"
+                )
             ],
 
             [
                 "Стенки цилиндров",
-                endoscopy_data.get("cylinder_walls", "—")
+                endoscopy_data.get(
+                    "cylinder_walls",
+                    "—"
+                )
             ],
 
             [
                 "Поршни",
-                endoscopy_data.get("pistons", "—")
+                endoscopy_data.get(
+                    "pistons",
+                    "—"
+                )
             ],
 
             [
                 "Следы задиров",
-                endoscopy_data.get("scoring", "—")
+                endoscopy_data.get(
+                    "scoring",
+                    "—"
+                )
             ],
 
             [
                 "Следы нагара",
-                endoscopy_data.get("carbon", "—")
+                endoscopy_data.get(
+                    "carbon",
+                    "—"
+                )
             ],
 
             [
                 "Следы масла",
-                endoscopy_data.get("oil", "—")
+                endoscopy_data.get(
+                    "oil",
+                    "—"
+                )
             ],
 
             [
                 "Общее состояние",
-                endoscopy_data.get("overall", "—")
+                endoscopy_data.get(
+                    "overall",
+                    "—"
+                )
             ],
         ]
 
@@ -2137,8 +2789,9 @@ def create_pdf(
 
                 photo_index = index + position
 
-                if photo_index >= len(photo_paths):
-
+                if photo_index >= len(
+                    photo_paths
+                ):
                     break
 
                 photo_path = photo_paths[
@@ -2351,7 +3004,7 @@ def create_pdf(
 
 
 # =========================================================
-# УДАЛЕНИЕ ВРЕМЕННЫХ ФОТО
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =========================================================
 
 def cleanup_photo_paths(
@@ -2371,9 +3024,222 @@ def cleanup_photo_paths(
             pass
 
 
-# =========================================================
-# ФОРМИРОВАНИЕ И ОТПРАВКА PDF
-# =========================================================
+async def send_prompt(
+    message,
+    state,
+    text,
+    reply_markup=back_keyboard
+):
+
+    current_state = await state.get_state()
+
+    progress = progress_text(
+        current_state
+    )
+
+    if progress:
+
+        text = (
+            f"{progress}\n\n"
+            f"{text}"
+        )
+
+    await message.answer(
+        text,
+        reply_markup=reply_markup
+    )
+
+
+async def finish_or_continue_edit(
+    message,
+    state,
+    next_state,
+    prompt,
+    reply_markup=back_keyboard
+):
+
+    data = await state.get_data()
+
+    if data.get(
+        "edit_return_to_review"
+    ):
+
+        await state.update_data(
+            edit_return_to_review=False
+        )
+
+        await state.set_state(
+            InspectionForm.review
+        )
+
+        await show_review(
+            message,
+            state
+        )
+
+        return True
+
+    await state.set_state(
+        next_state
+    )
+
+    await send_prompt(
+        message,
+        state,
+        prompt,
+        reply_markup
+    )
+
+    return False
+
+
+async def show_review(
+    message,
+    state
+):
+
+    data = await state.get_data()
+
+    make = data.get(
+        "make",
+        "—"
+    )
+
+    model = data.get(
+        "model",
+        "—"
+    )
+
+    year = data.get(
+        "year",
+        "—"
+    )
+
+    vin = data.get(
+        "vin",
+        "—"
+    )
+
+    mileage = data.get(
+        "mileage",
+        "—"
+    )
+
+    measurements = data.get(
+        "measurements",
+        {}
+    )
+
+    photos = data.get(
+        "photos",
+        []
+    )
+
+    queue = data.get(
+        "manual_equipment_queue",
+        []
+    )
+
+    equipment_results = data.get(
+        "equipment_results",
+        {}
+    )
+
+    endoscopy = data.get(
+        "endoscopy_data",
+        {}
+    )
+
+    completed_equipment = 0
+
+    for category in equipment_results.values():
+
+        if not isinstance(
+            category,
+            dict
+        ):
+            continue
+
+        for item in category.values():
+
+            if item.get(
+                "status"
+            ) == "Ручной ввод":
+
+                completed_equipment += 1
+
+    review_text = (
+
+        "📋 <b>ПРОВЕРКА АКТА</b>\n\n"
+
+        f"🚗 <b>{make} {model}</b>\n"
+        f"Год: {year}\n"
+        f"VIN: {vin}\n"
+        f"Пробег: {mileage} км\n\n"
+
+        f"🎨 ЛКП: "
+        f"{len(measurements)}/{len(LKP_PARTS)} замеров\n"
+
+        f"📷 Фотографии: "
+        f"{len(photos)}\n"
+
+        f"🧰 Комплектация: "
+        f"{completed_equipment}/{len(queue)}\n"
+
+        f"🔬 Эндоскопия: "
+        f"{len(endoscopy)}/7\n\n"
+
+        "Перед созданием PDF можно изменить любой раздел."
+    )
+
+    await state.set_state(
+        InspectionForm.review
+    )
+
+    await message.answer(
+        review_text,
+        parse_mode="HTML",
+        reply_markup=review_keyboard()
+    )
+
+
+async def download_report_photos(
+    photo_ids
+):
+
+    paths = []
+
+    for number, file_id in enumerate(
+        photo_ids,
+        start=1
+    ):
+
+        file = await bot.get_file(
+            file_id
+        )
+
+        unique_name = (
+            f"yurmax_"
+            f"{uuid.uuid4().hex}_"
+            f"{number}.jpg"
+        )
+
+        path = os.path.join(
+            "/tmp",
+            unique_name
+        )
+
+        await bot.download_file(
+            file.file_path,
+            path
+        )
+
+        paths.append(
+            path
+        )
+
+    return paths
+
 
 async def generate_and_send_report(
     message,
@@ -2382,12 +3248,22 @@ async def generate_and_send_report(
 
     data = await state.get_data()
 
-    photo_paths = data.get(
-        "photo_paths",
+    photo_ids = data.get(
+        "photos",
         []
     )
 
+    photo_paths = []
+
     try:
+
+        await message.answer(
+            "⏳ Формирую PDF-отчёт..."
+        )
+
+        photo_paths = await download_report_photos(
+            photo_ids
+        )
 
         car_data = {
 
@@ -2460,24 +3336,44 @@ async def generate_and_send_report(
             )
         )
 
+        filename = (
+            "YURMAX_"
+            f"{data['make']}_"
+            f"{data['model']}_"
+            "AKT_OSMOTRA.pdf"
+        )
+
+        filename = filename.replace(
+            "/",
+            "_"
+        ).replace(
+            "\\",
+            "_"
+        )
+
         await message.answer_document(
 
             types.BufferedInputFile(
 
                 pdf.read(),
 
-                filename=
-                    "YURMAX_AKT_OSMOTRA.pdf"
+                filename=filename
             )
         )
 
         await message.answer(
 
-            "Готово.\n\n"
+            "✅ <b>Готово!</b>\n\n"
             "PDF-отчёт ЮМАКС сформирован.",
+
+            parse_mode="HTML",
 
             reply_markup=main_keyboard
         )
+
+        # Очищаем FSM ТОЛЬКО после успешного создания
+        # и отправки PDF.
+        await state.clear()
 
     except Exception as e:
 
@@ -2488,8 +3384,11 @@ async def generate_and_send_report(
 
         await message.answer(
 
-            "Произошла ошибка при формировании PDF.\n\n"
-            "Проверь логи Render."
+            "❌ Произошла ошибка при формировании PDF.\n\n"
+            "Данные акта сохранены.\n"
+            "Можно повторить попытку — ничего вводить заново не нужно.",
+
+            reply_markup=main_keyboard
         )
 
     finally:
@@ -2498,7 +3397,776 @@ async def generate_and_send_report(
             photo_paths
         )
 
-        await state.clear()
+
+# =========================================================
+# PROMPT ПО ТЕКУЩЕМУ STATE
+# =========================================================
+
+async def show_current_state_prompt(
+    message,
+    state
+):
+
+    current = await state.get_state()
+
+    data = await state.get_data()
+
+    if current is None:
+
+        paused = data.get(
+            "paused_state"
+        )
+
+        if paused:
+
+            await state.set_state(
+                paused
+            )
+
+            current = paused
+
+        else:
+
+            await message.answer(
+                "Активного шага нет.",
+                reply_markup=main_keyboard
+            )
+
+            return
+
+    if current == InspectionForm.master_name.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите имя мастера осмотра."
+        )
+
+    elif current == InspectionForm.report_date.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите дату формирования отчёта.\n\n"
+            "Формат: ДД.ММ.ГГГГ"
+        )
+
+    elif current == InspectionForm.make.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите марку автомобиля."
+        )
+
+    elif current == InspectionForm.model.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите модель автомобиля."
+        )
+
+    elif current == InspectionForm.year.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите год выпуска."
+        )
+
+    elif current == InspectionForm.vin.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите VIN автомобиля."
+        )
+
+    elif current == InspectionForm.mileage.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите пробег автомобиля в километрах."
+        )
+
+    elif current == InspectionForm.body_type.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите тип кузова."
+        )
+
+    elif current == InspectionForm.body_color.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите цвет автомобиля."
+        )
+
+    elif current == InspectionForm.wheel_radius.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите радиус колёс.\n\n"
+            "Например: R18"
+        )
+
+    elif current == InspectionForm.drive.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите привод автомобиля.\n\n"
+            "Например: Передний / Задний / 4х4"
+        )
+
+    elif current == InspectionForm.paint_type.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите тип лакокрасочного покрытия."
+        )
+
+    elif current == InspectionForm.display_size.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите размер дисплея."
+        )
+
+    elif current == InspectionForm.seat_material.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите материал сидений."
+        )
+
+    elif current == InspectionForm.wheel_type.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите тип дисков."
+        )
+
+    elif current == InspectionForm.interior_color.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите цвет салона."
+        )
+
+    elif current == InspectionForm.seat_count.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите количество мест."
+        )
+
+    elif current == InspectionForm.audio_system_name.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите название аудиосистемы."
+        )
+
+    elif current == InspectionForm.speaker_count.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите количество динамиков."
+        )
+
+    elif current == InspectionForm.engine_type.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Выберите тип двигателя.",
+            engine_keyboard
+        )
+
+    elif current == InspectionForm.engine_volume.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите объём двигателя в литрах."
+        )
+
+    elif current == InspectionForm.engine_hp.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Введите мощность двигателя в л.с."
+        )
+
+    elif current == InspectionForm.gearbox.state:
+
+        await send_prompt(
+            message,
+            state,
+            "Выберите коробку передач.",
+            gearbox_keyboard
+        )
+
+    elif current == InspectionForm.lkp.state:
+
+        index = data.get(
+            "lkp_index",
+            0
+        )
+
+        index = max(
+            0,
+            min(
+                index,
+                len(LKP_PARTS) - 1
+            )
+        )
+
+        await send_prompt(
+            message,
+            state,
+            f"Введите толщину ЛКП.\n\n"
+            f"Деталь: {LKP_PARTS[index]}\n\n"
+            f"Например: 145"
+        )
+
+    elif current == InspectionForm.photos.state:
+
+        await send_prompt(
+            message,
+            state,
+            f"📷 Фотографии\n\n"
+            f"Сейчас сохранено: "
+            f"{len(data.get('photos', []))}\n\n"
+            f"Отправляйте фотографии.\n"
+            f"После этого нажмите «Готово».",
+            finish_photos_keyboard
+        )
+
+    elif current == InspectionForm.manual_equipment.state:
+
+        await ask_next_manual_equipment(
+            message,
+            state
+        )
+
+    elif current == InspectionForm.endoscopy_cylinders.state:
+
+        await send_prompt(
+            message,
+            state,
+            "1/7. Введите результат по цилиндрам.",
+            endoscopy_keyboard
+        )
+
+    elif current == InspectionForm.endoscopy_cylinder_walls.state:
+
+        await send_prompt(
+            message,
+            state,
+            "2/7. Опишите стенки цилиндров.",
+            endoscopy_keyboard
+        )
+
+    elif current == InspectionForm.endoscopy_pistons.state:
+
+        await send_prompt(
+            message,
+            state,
+            "3/7. Опишите состояние поршней.",
+            endoscopy_keyboard
+        )
+
+    elif current == InspectionForm.endoscopy_scoring.state:
+
+        await send_prompt(
+            message,
+            state,
+            "4/7. Опишите наличие или отсутствие задиров.",
+            endoscopy_keyboard
+        )
+
+    elif current == InspectionForm.endoscopy_carbon.state:
+
+        await send_prompt(
+            message,
+            state,
+            "5/7. Опишите наличие или отсутствие нагара.",
+            endoscopy_keyboard
+        )
+
+    elif current == InspectionForm.endoscopy_oil.state:
+
+        await send_prompt(
+            message,
+            state,
+            "6/7. Опишите наличие или отсутствие масла.",
+            endoscopy_keyboard
+        )
+
+    elif current == InspectionForm.endoscopy_overall.state:
+
+        await send_prompt(
+            message,
+            state,
+            "7/7. Введите общее состояние двигателя.",
+            endoscopy_keyboard
+        )
+
+    elif current == InspectionForm.review.state:
+
+        await show_review(
+            message,
+            state
+        )
+
+
+# =========================================================
+# НАЗАД — КАРТА ПРЕДЫДУЩИХ СОСТОЯНИЙ
+# =========================================================
+
+PREVIOUS_STATES = {
+
+    InspectionForm.report_date.state:
+        InspectionForm.master_name.state,
+
+    InspectionForm.make.state:
+        InspectionForm.report_date.state,
+
+    InspectionForm.model.state:
+        InspectionForm.make.state,
+
+    InspectionForm.year.state:
+        InspectionForm.model.state,
+
+    InspectionForm.vin.state:
+        InspectionForm.year.state,
+
+    InspectionForm.mileage.state:
+        InspectionForm.vin.state,
+
+    InspectionForm.body_type.state:
+        InspectionForm.mileage.state,
+
+    InspectionForm.body_color.state:
+        InspectionForm.body_type.state,
+
+    InspectionForm.wheel_radius.state:
+        InspectionForm.body_color.state,
+
+    InspectionForm.drive.state:
+        InspectionForm.wheel_radius.state,
+
+    InspectionForm.paint_type.state:
+        InspectionForm.drive.state,
+
+    InspectionForm.display_size.state:
+        InspectionForm.paint_type.state,
+
+    InspectionForm.seat_material.state:
+        InspectionForm.display_size.state,
+
+    InspectionForm.wheel_type.state:
+        InspectionForm.seat_material.state,
+
+    InspectionForm.interior_color.state:
+        InspectionForm.wheel_type.state,
+
+    InspectionForm.seat_count.state:
+        InspectionForm.interior_color.state,
+
+    InspectionForm.audio_system_name.state:
+        InspectionForm.seat_count.state,
+
+    InspectionForm.speaker_count.state:
+        InspectionForm.audio_system_name.state,
+
+    InspectionForm.engine_type.state:
+        InspectionForm.speaker_count.state,
+
+    InspectionForm.engine_volume.state:
+        InspectionForm.engine_type.state,
+
+    InspectionForm.engine_hp.state:
+        InspectionForm.engine_volume.state,
+
+    InspectionForm.gearbox.state:
+        InspectionForm.engine_hp.state,
+}
+
+
+# =========================================================
+# МЕНЮ
+# =========================================================
+
+@dp.message(
+    F.text == MENU_TEXT
+)
+async def menu_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    current = await state.get_state()
+
+    if current:
+
+        await state.update_data(
+            paused_state=current,
+            draft_active=True
+        )
+
+        await state.set_state(
+            None
+        )
+
+    data = await state.get_data()
+
+    if data.get(
+        "draft_active"
+    ):
+
+        await message.answer(
+
+            "🏠 <b>Меню ЮМАКС</b>\n\n"
+            "У тебя есть незавершённый акт.\n"
+            "Данные сохранены.",
+
+            parse_mode="HTML",
+
+            reply_markup=main_keyboard
+        )
+
+    else:
+
+        await message.answer(
+
+            "🏠 <b>Меню ЮМАКС</b>\n\n"
+            "Можно создать новый акт.",
+
+            parse_mode="HTML",
+
+            reply_markup=main_keyboard
+        )
+
+
+# =========================================================
+# НАЗАД
+# =========================================================
+
+@dp.message(
+    F.text == BACK_TEXT
+)
+async def back_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    current = await state.get_state()
+
+    data = await state.get_data()
+
+    if not current:
+
+        paused = data.get(
+            "paused_state"
+        )
+
+        if paused:
+
+            await state.set_state(
+                paused
+            )
+
+            await show_current_state_prompt(
+                message,
+                state
+            )
+
+        else:
+
+            await message.answer(
+                "Ты находишься в главном меню.",
+                reply_markup=main_keyboard
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # Если редактируем готовый акт
+    # -----------------------------------------------------
+
+    if data.get(
+        "edit_return_to_review"
+    ):
+
+        await state.update_data(
+            edit_return_to_review=False
+        )
+
+        await state.set_state(
+            InspectionForm.review
+        )
+
+        await show_review(
+            message,
+            state
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ЛКП
+    # -----------------------------------------------------
+
+    if current == InspectionForm.lkp.state:
+
+        index = data.get(
+            "lkp_index",
+            0
+        )
+
+        if index > 0:
+
+            index -= 1
+
+            await state.update_data(
+                lkp_index=index
+            )
+
+            await message.answer(
+
+                f"Возвращаемся.\n\n"
+                f"Деталь: {LKP_PARTS[index]}\n\n"
+                f"Введите значение ЛКП:",
+
+                reply_markup=back_keyboard
+            )
+
+        else:
+
+            await state.set_state(
+                InspectionForm.gearbox
+            )
+
+            await message.answer(
+                "Возвращаемся к коробке передач.",
+                reply_markup=gearbox_keyboard
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # ФОТО
+    # -----------------------------------------------------
+
+    if current == InspectionForm.photos.state:
+
+        await state.set_state(
+            InspectionForm.lkp.state
+        )
+
+        await state.update_data(
+            lkp_index=len(LKP_PARTS) - 1
+        )
+
+        await message.answer(
+
+            f"Возвращаемся к ЛКП.\n\n"
+            f"Деталь: {LKP_PARTS[-1]}\n\n"
+            f"Введите значение:",
+
+            reply_markup=back_keyboard
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # РУЧНАЯ КОМПЛЕКТАЦИЯ
+    # -----------------------------------------------------
+
+    if current == InspectionForm.manual_equipment.state:
+
+        index = data.get(
+            "manual_equipment_index",
+            0
+        )
+
+        if index > 0:
+
+            index -= 1
+
+            queue = data.get(
+                "manual_equipment_queue",
+                []
+            )
+
+            await state.update_data(
+                manual_equipment_index=index
+            )
+
+            if index < len(queue):
+
+                item = queue[index]
+
+                await state.update_data(
+                    manual_current_category=
+                        item["category"],
+                    manual_current_option=
+                        item["option"]
+                )
+
+                await ask_next_manual_equipment(
+                    message,
+                    state
+                )
+
+        else:
+
+            await state.set_state(
+                InspectionForm.photos.state
+            )
+
+            await message.answer(
+                "Возвращаемся к фотографиям.",
+                reply_markup=finish_photos_keyboard
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # ЭНДОСКОПИЯ
+    # -----------------------------------------------------
+
+    endoscopy_states = [
+        InspectionForm.endoscopy_cylinders.state,
+        InspectionForm.endoscopy_cylinder_walls.state,
+        InspectionForm.endoscopy_pistons.state,
+        InspectionForm.endoscopy_scoring.state,
+        InspectionForm.endoscopy_carbon.state,
+        InspectionForm.endoscopy_oil.state,
+        InspectionForm.endoscopy_overall.state,
+    ]
+
+    if current in endoscopy_states:
+
+        index = endoscopy_states.index(
+            current
+        )
+
+        if index > 0:
+
+            previous = endoscopy_states[
+                index - 1
+            ]
+
+            await state.set_state(
+                previous
+            )
+
+            await show_current_state_prompt(
+                message,
+                state
+            )
+
+        else:
+
+            queue = data.get(
+                "manual_equipment_queue",
+                []
+            )
+
+            await state.update_data(
+                manual_equipment_index=max(
+                    0,
+                    len(queue) - 1
+                ),
+                endoscopy_resume_state=
+                    InspectionForm.endoscopy_cylinders.state
+            )
+
+            await state.set_state(
+                InspectionForm.manual_equipment
+            )
+
+            await ask_next_manual_equipment(
+                message,
+                state
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # REVIEW
+    # -----------------------------------------------------
+
+    if current == InspectionForm.review.state:
+
+        await message.answer(
+            "Выберите действие ниже.",
+            reply_markup=review_keyboard()
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # EDIT MENU
+    # -----------------------------------------------------
+
+    if current == InspectionForm.edit_menu.state:
+
+        await state.set_state(
+            InspectionForm.review
+        )
+
+        await show_review(
+            message,
+            state
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ОБЫЧНЫЕ ПОЛЯ
+    # -----------------------------------------------------
+
+    previous = PREVIOUS_STATES.get(
+        current
+    )
+
+    if previous:
+
+        await state.set_state(
+            previous
+        )
+
+        await show_current_state_prompt(
+            message,
+            state
+        )
+
+        return
+
+    await message.answer(
+        "Назад на этом шаге недоступно.",
+        reply_markup=back_keyboard
+    )
 
 
 # =========================================================
@@ -2513,15 +4181,109 @@ async def start_handler(
     state: FSMContext
 ):
 
-    await state.clear()
+    current = await state.get_state()
+    data = await state.get_data()
+
+    if current:
+
+        await message.answer(
+
+            "🔄 <b>Продолжаем незавершённый акт.</b>\n\n"
+            "Все ранее введённые данные сохранены.",
+
+            parse_mode="HTML"
+        )
+
+        await show_current_state_prompt(
+            message,
+            state
+        )
+
+        return
+
+    paused = data.get(
+        "paused_state"
+    )
+
+    if data.get(
+        "draft_active"
+    ) and paused:
+
+        await state.set_state(
+            paused
+        )
+
+        await message.answer(
+
+            "🔄 <b>Найден незавершённый акт.</b>\n\n"
+            "Продолжаем с того места, где остановились.",
+
+            parse_mode="HTML"
+        )
+
+        await show_current_state_prompt(
+            message,
+            state
+        )
+
+        return
 
     await message.answer(
 
         "Добро пожаловать в ЮМАКС.\n\n"
         "Здесь можно сформировать "
-        "профессиональный отчёт осмотра автомобиля.",
+        "профессиональный отчёт осмотра автомобиля.\n\n"
+        "Все данные сохраняются автоматически.",
 
         reply_markup=main_keyboard
+    )
+
+
+# =========================================================
+# ПРОДОЛЖИТЬ
+# =========================================================
+
+@dp.message(
+    F.text == CONTINUE_TEXT
+)
+async def continue_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    data = await state.get_data()
+
+    paused = data.get(
+        "paused_state"
+    )
+
+    current = await state.get_state()
+
+    if current:
+
+        await show_current_state_prompt(
+            message,
+            state
+        )
+
+        return
+
+    if not paused:
+
+        await message.answer(
+            "Незавершённого акта нет.",
+            reply_markup=main_keyboard
+        )
+
+        return
+
+    await state.set_state(
+        paused
+    )
+
+    await show_current_state_prompt(
+        message,
+        state
     )
 
 
@@ -2530,14 +4292,65 @@ async def start_handler(
 # =========================================================
 
 @dp.message(
-    F.text == "Создать акт"
+    F.text == CREATE_TEXT
 )
 async def create_handler(
     message: types.Message,
     state: FSMContext
 ):
 
+    data = await state.get_data()
+
+    if data.get(
+        "draft_active"
+    ):
+
+        await message.answer(
+
+            "⚠️ У тебя уже есть незавершённый акт.\n\n"
+            "Если начать новый, текущий черновик будет удалён.\n\n"
+            "Продолжить текущий акт можно кнопкой "
+            "«▶️ Продолжить акт».",
+
+            reply_markup=new_report_confirm_keyboard()
+        )
+
+        return
+
+    await start_new_report(
+        message,
+        state
+    )
+
+
+# =========================================================
+# НОВЫЙ АКТ
+# =========================================================
+
+@dp.message(
+    Command("new")
+)
+async def new_command(
+    message: types.Message,
+    state: FSMContext
+):
+
+    await start_new_report(
+        message,
+        state
+    )
+
+
+async def start_new_report(
+    message,
+    state
+):
+
     await state.clear()
+
+    await state.update_data(
+        draft_active=True
+    )
 
     await state.set_state(
         InspectionForm.master_name
@@ -2545,8 +4358,53 @@ async def create_handler(
 
     await message.answer(
 
+        "🆕 <b>Новый акт ЮМАКС</b>\n\n"
         "Введите имя мастера осмотра.\n\n"
-        "Например: Ян Ковальский"
+        "Например: Ян Ковальский",
+
+        parse_mode="HTML",
+
+        reply_markup=back_keyboard
+    )
+
+
+# =========================================================
+# ПОДТВЕРЖДЕНИЕ НОВОГО АКТА
+# =========================================================
+
+@dp.callback_query(
+    F.data == "new_confirm"
+)
+async def new_confirm_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await callback.answer()
+
+    await start_new_report(
+        callback.message,
+        state
+    )
+
+
+@dp.callback_query(
+    F.data == "new_cancel"
+)
+async def new_cancel_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await callback.answer()
+
+    await callback.message.edit_reply_markup(
+        reply_markup=None
+    )
+
+    await callback.message.answer(
+        "Текущий акт сохранён.",
+        reply_markup=main_keyboard
     )
 
 
@@ -2578,11 +4436,12 @@ async def master_handler(
         master_name=master_name
     )
 
-    await state.set_state(
-        InspectionForm.report_date
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.report_date,
 
         "Введите дату формирования отчёта.\n\n"
         "Формат: ДД.ММ.ГГГГ\n"
@@ -2622,9 +4481,7 @@ async def report_date_handler(
         await message.answer(
 
             "Неверный формат даты.\n\n"
-            "Введите дату в формате:\n"
-            "ДД.ММ.ГГГГ\n\n"
-            "Например: 20.09.2026"
+            "Введите: ДД.ММ.ГГГГ"
         )
 
         return
@@ -2633,11 +4490,12 @@ async def report_date_handler(
         report_date=report_date
     )
 
-    await state.set_state(
-        InspectionForm.make
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.make,
 
         "Введите марку автомобиля.\n\n"
         "Например: BMW"
@@ -2672,11 +4530,12 @@ async def make_handler(
         make=value
     )
 
-    await state.set_state(
-        InspectionForm.model
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.model,
 
         "Введите модель автомобиля.\n\n"
         "Например: X5"
@@ -2711,11 +4570,12 @@ async def model_handler(
         model=value
     )
 
-    await state.set_state(
-        InspectionForm.year
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.year,
 
         "Введите год выпуска.\n\n"
         "Например: 2021"
@@ -2761,11 +4621,13 @@ async def year_handler(
         year=value
     )
 
-    await state.set_state(
-        InspectionForm.vin
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.vin,
+
         "Введите VIN автомобиля."
     )
 
@@ -2798,11 +4660,12 @@ async def vin_handler(
         vin=value.upper()
     )
 
-    await state.set_state(
-        InspectionForm.mileage
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.mileage,
 
         "Введите пробег автомобиля в километрах.\n\n"
         "Например: 124500"
@@ -2828,9 +4691,7 @@ async def mileage_handler(
     if not value.isdigit():
 
         await message.answer(
-
-            "Введите пробег только цифрами.\n"
-            "Например: 124500"
+            "Введите пробег только цифрами."
         )
 
         return
@@ -2839,23 +4700,15 @@ async def mileage_handler(
         mileage=value
     )
 
-    await state.set_state(
-        InspectionForm.body_type
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.body_type,
 
         "Введите тип кузова.\n\n"
-        "Например:\n"
-        "Седан\n"
-        "Универсал\n"
-        "Хэтчбек\n"
-        "Кроссовер\n"
-        "Внедорожник\n"
-        "Купе\n"
-        "Кабриолет\n"
-        "Минивэн\n"
-        "Пикап"
+        "Например: Седан / Кроссовер / Минивэн"
     )
 
 
@@ -2887,11 +4740,12 @@ async def body_type_handler(
         body_type=value
     )
 
-    await state.set_state(
-        InspectionForm.body_color
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.body_color,
 
         "Введите цвет автомобиля.\n\n"
         "Например: Чёрный металлик"
@@ -2926,15 +4780,15 @@ async def body_color_handler(
         body_color=value
     )
 
-    await state.set_state(
-        InspectionForm.wheel_radius
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.wheel_radius,
 
         "Введите радиус колёс.\n\n"
-        "Например: R18\n"
-        "или: 18"
+        "Например: R18"
     )
 
 
@@ -2970,16 +4824,15 @@ async def wheel_radius_handler(
         wheel_radius=value
     )
 
-    await state.set_state(InspectionForm.drive)
+    await finish_or_continue_edit(
 
-    await message.answer(
-        "Введите привод автомобиля.\\n\\n"
+        message,
+        state,
+
+        InspectionForm.drive,
+
+        "Введите привод автомобиля.\n\n"
         "Например: Передний / Задний / 4х4 / Полный привод"
-    )
-
-    await message.answer(
-        "Введите тип лакокрасочного покрытия.\\n\\n"
-        "Например: Металлик / Перламутр / Обычное покрытие"
     )
 
 
@@ -2987,113 +4840,379 @@ async def wheel_radius_handler(
 # ПРИВОД
 # =========================================================
 
-@dp.message(InspectionForm.drive)
-async def drive_handler(message: types.Message, state: FSMContext):
+@dp.message(
+    InspectionForm.drive
+)
+async def drive_handler(
+    message: types.Message,
+    state: FSMContext
+):
 
-    value = (message.text or "").strip()
+    value = (
+        message.text or ""
+    ).strip()
 
     if not value:
-        await message.answer("Введите привод автомобиля.")
+
+        await message.answer(
+            "Введите привод автомобиля."
+        )
+
         return
 
-    await state.update_data(drive=value)
-    await state.set_state(InspectionForm.paint_type)
-    await message.answer(
-        "Введите тип лакокрасочного покрытия.\\n\\n"
+    await state.update_data(
+        drive=value
+    )
+
+    await finish_or_continue_edit(
+
+        message,
+        state,
+
+        InspectionForm.paint_type,
+
+        "Введите тип лакокрасочного покрытия.\n\n"
         "Например: Металлик / Перламутр / Обычное покрытие"
     )
 
 
-@dp.message(InspectionForm.paint_type)
-async def paint_type_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
-    if not value:
-        await message.answer("Введите тип лакокрасочного покрытия.")
-        return
-    await state.update_data(paint_type=value)
-    await state.set_state(InspectionForm.display_size)
-    await message.answer("Введите размер дисплея.\\n\\nНапример: 10.25 дюйма")
+# =========================================================
+# ЛКП ТИП
+# =========================================================
 
+@dp.message(
+    InspectionForm.paint_type
+)
+async def paint_type_handler(
+    message: types.Message,
+    state: FSMContext
+):
 
-@dp.message(InspectionForm.display_size)
-async def display_size_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
+    value = (
+        message.text or ""
+    ).strip()
+
     if not value:
-        await message.answer("Введите размер дисплея.")
+
+        await message.answer(
+            "Введите тип лакокрасочного покрытия."
+        )
+
         return
-    await state.update_data(display_size=value)
-    await state.set_state(InspectionForm.seat_material)
-    await message.answer("Введите материал сидений.\\n\\nНапример: Кожа / Алькантара / Ткань / Кожа+алькантара")
+
+    await state.update_data(
+        paint_type=value
+    )
+
+    await finish_or_continue_edit(
+
+        message,
+        state,
+
+        InspectionForm.display_size,
+
+        "Введите размер дисплея.\n\n"
+        "Например: 10.25 дюйма"
+    )
 
 
 # =========================================================
-# ДОПОЛНИТЕЛЬНЫЕ ПОЛЯ КОМПЛЕКТАЦИИ
+# ДИСПЛЕЙ
 # =========================================================
 
-@dp.message(InspectionForm.seat_material)
-async def seat_material_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
+@dp.message(
+    InspectionForm.display_size
+)
+async def display_size_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
     if not value:
-        await message.answer("Введите материал сидений.")
+
+        await message.answer(
+            "Введите размер дисплея."
+        )
+
         return
-    await state.update_data(seat_material=value)
-    await state.set_state(InspectionForm.wheel_type)
-    await message.answer("Введите тип дисков.\\n\\nНапример: Легкосплавные / Штампованные / Кованые")
+
+    await state.update_data(
+        display_size=value
+    )
+
+    await finish_or_continue_edit(
+
+        message,
+        state,
+
+        InspectionForm.seat_material,
+
+        "Введите материал сидений.\n\n"
+        "Например: Кожа / Алькантара / Ткань"
+    )
 
 
-@dp.message(InspectionForm.wheel_type)
-async def wheel_type_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
+# =========================================================
+# МАТЕРИАЛ СИДЕНИЙ
+# =========================================================
+
+@dp.message(
+    InspectionForm.seat_material
+)
+async def seat_material_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
     if not value:
-        await message.answer("Введите тип дисков.")
+
+        await message.answer(
+            "Введите материал сидений."
+        )
+
         return
-    await state.update_data(wheel_type=value)
-    await state.set_state(InspectionForm.interior_color)
-    await message.answer("Введите цвет салона.\\n\\nНапример: Чёрный")
+
+    await state.update_data(
+        seat_material=value
+    )
+
+    await finish_or_continue_edit(
+
+        message,
+        state,
+
+        InspectionForm.wheel_type,
+
+        "Введите тип дисков.\n\n"
+        "Например: Легкосплавные / Штампованные / Кованые"
+    )
 
 
-@dp.message(InspectionForm.interior_color)
-async def interior_color_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
+# =========================================================
+# ТИП ДИСКОВ
+# =========================================================
+
+@dp.message(
+    InspectionForm.wheel_type
+)
+async def wheel_type_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
     if not value:
-        await message.answer("Введите цвет салона.")
+
+        await message.answer(
+            "Введите тип дисков."
+        )
+
         return
-    await state.update_data(interior_color=value)
-    await state.set_state(InspectionForm.seat_count)
-    await message.answer("Введите количество мест.\\n\\nНапример: 5")
+
+    await state.update_data(
+        wheel_type=value
+    )
+
+    await finish_or_continue_edit(
+
+        message,
+        state,
+
+        InspectionForm.interior_color,
+
+        "Введите цвет салона.\n\n"
+        "Например: Чёрный"
+    )
 
 
-@dp.message(InspectionForm.seat_count)
-async def seat_count_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
+# =========================================================
+# ЦВЕТ САЛОНА
+# =========================================================
+
+@dp.message(
+    InspectionForm.interior_color
+)
+async def interior_color_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
+    if not value:
+
+        await message.answer(
+            "Введите цвет салона."
+        )
+
+        return
+
+    await state.update_data(
+        interior_color=value
+    )
+
+    await finish_or_continue_edit(
+
+        message,
+        state,
+
+        InspectionForm.seat_count,
+
+        "Введите количество мест.\n\n"
+        "Например: 5"
+    )
+
+
+# =========================================================
+# КОЛИЧЕСТВО МЕСТ
+# =========================================================
+
+@dp.message(
+    InspectionForm.seat_count
+)
+async def seat_count_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
     if not value.isdigit() or not 1 <= int(value) <= 20:
-        await message.answer("Введите количество мест цифрами от 1 до 20.")
+
+        await message.answer(
+            "Введите количество мест цифрами от 1 до 20."
+        )
+
         return
-    await state.update_data(seat_count=value)
-    await state.set_state(InspectionForm.audio_system_name)
-    await message.answer("Введите название аудиосистемы.\\n\\nНапример: Harman Kardon")
+
+    await state.update_data(
+        seat_count=value
+    )
+
+    await finish_or_continue_edit(
+
+        message,
+        state,
+
+        InspectionForm.audio_system_name,
+
+        "Введите название аудиосистемы.\n\n"
+        "Например: Harman Kardon"
+    )
 
 
-@dp.message(InspectionForm.audio_system_name)
-async def audio_system_name_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
+# =========================================================
+# АУДИО
+# =========================================================
+
+@dp.message(
+    InspectionForm.audio_system_name
+)
+async def audio_system_name_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
     if not value:
-        await message.answer("Введите название аудиосистемы.")
+
+        await message.answer(
+            "Введите название аудиосистемы."
+        )
+
         return
-    await state.update_data(audio_system_name=value)
-    await state.set_state(InspectionForm.speaker_count)
-    await message.answer("Введите количество динамиков.\\n\\nНапример: 16")
+
+    await state.update_data(
+        audio_system_name=value
+    )
+
+    await finish_or_continue_edit(
+
+        message,
+        state,
+
+        InspectionForm.speaker_count,
+
+        "Введите количество динамиков.\n\n"
+        "Например: 16"
+    )
 
 
-@dp.message(InspectionForm.speaker_count)
-async def speaker_count_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
+# =========================================================
+# ДИНАМИКИ
+# =========================================================
+
+@dp.message(
+    InspectionForm.speaker_count
+)
+async def speaker_count_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
     if not value.isdigit() or not 0 <= int(value) <= 100:
-        await message.answer("Введите количество динамиков цифрами от 0 до 100.")
+
+        await message.answer(
+            "Введите количество динамиков цифрами от 0 до 100."
+        )
+
         return
-    await state.update_data(speaker_count=value)
-    await state.set_state(InspectionForm.engine_type)
-    await message.answer("Выберите тип двигателя.", reply_markup=engine_keyboard)
+
+    await state.update_data(
+        speaker_count=value
+    )
+
+    data = await state.get_data()
+
+    if data.get(
+        "edit_return_to_review"
+    ):
+
+        await state.update_data(
+            edit_return_to_review=False
+        )
+
+        await state.set_state(
+            InspectionForm.review
+        )
+
+        await show_review(
+            message,
+            state
+        )
+
+        return
+
+    await state.set_state(
+        InspectionForm.engine_type
+    )
+
+    await message.answer(
+        "Выберите тип двигателя.",
+        reply_markup=engine_keyboard
+    )
 
 
 # =========================================================
@@ -3109,7 +5228,6 @@ async def engine_type_handler(
 ):
 
     allowed = [
-
         "Бензин",
         "Дизель",
         "Гибрид",
@@ -3123,9 +5241,7 @@ async def engine_type_handler(
     if value not in allowed:
 
         await message.answer(
-
             "Выберите тип двигателя кнопкой.",
-
             reply_markup=engine_keyboard
         )
 
@@ -3135,14 +5251,15 @@ async def engine_type_handler(
         engine_type=value
     )
 
-    await state.set_state(
-        InspectionForm.engine_volume
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.engine_volume,
 
         "Введите объём двигателя в литрах.\n\n"
-        "Например: 2.0\n\n"
+        "Например: 2.0\n"
         "Для электро можно указать 0."
     )
 
@@ -3173,8 +5290,7 @@ async def engine_volume_handler(
     except ValueError:
 
         await message.answer(
-
-            "Введите объём цифрами.\n\n"
+            "Введите объём цифрами.\n"
             "Например: 2.0"
         )
 
@@ -3184,11 +5300,12 @@ async def engine_volume_handler(
         engine_volume=value
     )
 
-    await state.set_state(
-        InspectionForm.engine_hp
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.engine_hp,
 
         "Введите мощность двигателя в л.с.\n\n"
         "Например: 249"
@@ -3214,7 +5331,6 @@ async def engine_hp_handler(
     if not value.isdigit():
 
         await message.answer(
-
             "Введите мощность только цифрами.\n"
             "Например: 249"
         )
@@ -3225,15 +5341,16 @@ async def engine_hp_handler(
         engine_hp=value
     )
 
-    await state.set_state(
-        InspectionForm.gearbox
-    )
+    await finish_or_continue_edit(
 
-    await message.answer(
+        message,
+        state,
+
+        InspectionForm.gearbox,
 
         "Выберите коробку передач.",
 
-        reply_markup=gearbox_keyboard
+        gearbox_keyboard
     )
 
 
@@ -3250,7 +5367,6 @@ async def gearbox_handler(
 ):
 
     allowed = [
-
         "МКПП",
         "АКПП",
         "Робот",
@@ -3264,9 +5380,7 @@ async def gearbox_handler(
     if value not in allowed:
 
         await message.answer(
-
             "Выберите коробку кнопкой.",
-
             reply_markup=gearbox_keyboard
         )
 
@@ -3276,11 +5390,46 @@ async def gearbox_handler(
         gearbox=value
     )
 
+    data = await state.get_data()
+
+    if data.get(
+        "edit_return_to_review"
+    ):
+
+        await state.update_data(
+            edit_return_to_review=False
+        )
+
+        await state.set_state(
+            InspectionForm.review
+        )
+
+        await show_review(
+            message,
+            state
+        )
+
+        return
+
+    measurements = data.get(
+        "measurements"
+    )
+
+    if not isinstance(
+        measurements,
+        dict
+    ):
+
+        measurements = {}
+
     await state.update_data(
 
-        lkp_index=0,
+        lkp_index=data.get(
+            "lkp_index",
+            0
+        ),
 
-        measurements={}
+        measurements=measurements
     )
 
     await state.set_state(
@@ -3289,9 +5438,14 @@ async def gearbox_handler(
 
     await message.answer(
 
-        "Введите толщину ЛКП.\n\n"
-        f"Деталь: {LKP_PARTS[0]}\n\n"
-        "Например: 145"
+        f"🎨 <b>ЛКП</b>\n\n"
+        f"{progress_text(InspectionForm.lkp.state)}\n\n"
+        f"Введите толщину ЛКП.\n\n"
+        f"Деталь: {LKP_PARTS[data.get('lkp_index', 0)]}\n\n"
+        f"Например: 145",
+
+        parse_mode="HTML",
+        reply_markup=back_keyboard
     )
 
 
@@ -3314,7 +5468,6 @@ async def lkp_handler(
     if not value.isdigit():
 
         await message.answer(
-
             "Введите значение цифрами.\n"
             "Например: 145"
         )
@@ -3333,9 +5486,22 @@ async def lkp_handler(
 
     data = await state.get_data()
 
-    index = data["lkp_index"]
+    index = data.get(
+        "lkp_index",
+        0
+    )
 
-    measurements = data["measurements"]
+    measurements = data.get(
+        "measurements",
+        {}
+    )
+
+    if not isinstance(
+        measurements,
+        dict
+    ):
+
+        measurements = {}
 
     current_part = LKP_PARTS[index]
 
@@ -3358,20 +5524,41 @@ async def lkp_handler(
 
         await message.answer(
 
-            f"Принято: {current_part} — "
-            f"{measurement} µm\n\n"
-            "Теперь введите значение для:\n"
-            f"{LKP_PARTS[next_index]}"
+            f"✅ {current_part}: {measurement} µm\n\n"
+            f"Следующая деталь:\n"
+            f"<b>{LKP_PARTS[next_index]}</b>\n\n"
+            f"Введите значение:",
+
+            parse_mode="HTML",
+            reply_markup=back_keyboard
         )
 
         return
 
     await state.update_data(
-
-        measurements=measurements,
-
-        photos=[]
+        measurements=measurements
     )
+
+    data = await state.get_data()
+
+    if data.get(
+        "edit_return_to_review"
+    ):
+
+        await state.update_data(
+            edit_return_to_review=False
+        )
+
+        await state.set_state(
+            InspectionForm.review
+        )
+
+        await show_review(
+            message,
+            state
+        )
+
+        return
 
     await state.set_state(
         InspectionForm.photos
@@ -3379,10 +5566,12 @@ async def lkp_handler(
 
     await message.answer(
 
-        "Все замеры ЛКП получены.\n\n"
+        "✅ <b>Все замеры ЛКП получены.</b>\n\n"
         "Теперь отправьте фотографии автомобиля.\n\n"
         "Можно отправлять несколько фотографий подряд.\n"
         "Когда закончите — нажмите «Готово».",
+
+        parse_mode="HTML",
 
         reply_markup=finish_photos_keyboard
     )
@@ -3420,13 +5609,15 @@ async def photo_handler(
 
     await message.answer(
 
-        f"Фото №{len(photos)} получено.\n"
-        "Можешь отправить следующее или нажать «Готово»."
+        f"📷 Фото №{len(photos)} получено.\n"
+        f"Можешь отправить следующее или нажать «Готово».",
+
+        reply_markup=finish_photos_keyboard
     )
 
 
 # =========================================================
-# ГОТОВО
+# ГОТОВО ФОТО
 # =========================================================
 
 @dp.message(
@@ -3450,44 +5641,47 @@ async def finish_photos_handler(
         await message.answer(
 
             "Пока нет ни одной фотографии.\n\n"
-            "Отправь хотя бы одну фотографию "
-            "автомобиля."
+            "Отправь хотя бы одну фотографию автомобиля."
         )
 
         return
 
-    await message.answer(
+    # Если мы пришли сюда из финального редактирования —
+    # просто возвращаемся к проверке.
+    if data.get(
+        "edit_return_to_review"
+    ):
 
-        f"Получено фотографий: {len(photo_ids)}.\n\n"
-        "Загружаю фотографии..."
+        await state.update_data(
+            edit_return_to_review=False
+        )
+
+        await state.set_state(
+            InspectionForm.review
+        )
+
+        await message.answer(
+            f"📷 Сохранено фотографий: {len(photo_ids)}",
+            reply_markup=back_keyboard
+        )
+
+        await show_review(
+            message,
+            state
+        )
+
+        return
+
+    # Если комплектация уже существует — не пересоздаём её.
+    equipment_results = data.get(
+        "equipment_results"
     )
 
-    photo_paths = []
+    manual_queue = data.get(
+        "manual_equipment_queue"
+    )
 
-    try:
-
-        for number, file_id in enumerate(
-            photo_ids,
-            start=1
-        ):
-
-            file = await bot.get_file(
-                file_id
-            )
-
-            path = (
-                f"/tmp/"
-                f"yurmax_photo_{number}.jpg"
-            )
-
-            await bot.download_file(
-                file.file_path,
-                path
-            )
-
-            photo_paths.append(
-                path
-            )
+    if not equipment_results:
 
         equipment_results = (
             create_empty_equipment_results(
@@ -3500,72 +5694,86 @@ async def finish_photos_handler(
                     "body_color"
                 ],
 
-                wheel_radius=data["wheel_radius"],
-                paint_type=data["paint_type"],
-                display_size=data["display_size"],
-                seat_material=data["seat_material"],
-                wheel_type=data["wheel_type"],
-                interior_color=data["interior_color"],
-                seat_count=data["seat_count"],
-                audio_system_name=data["audio_system_name"],
-                speaker_count=data["speaker_count"]
+                wheel_radius=data[
+                    "wheel_radius"
+                ],
+
+                paint_type=data[
+                    "paint_type"
+                ],
+
+                display_size=data[
+                    "display_size"
+                ],
+
+                seat_material=data[
+                    "seat_material"
+                ],
+
+                wheel_type=data[
+                    "wheel_type"
+                ],
+
+                interior_color=data[
+                    "interior_color"
+                ],
+
+                seat_count=data[
+                    "seat_count"
+                ],
+
+                audio_system_name=data[
+                    "audio_system_name"
+                ],
+
+                speaker_count=data[
+                    "speaker_count"
+                ]
             )
         )
+
+    if not manual_queue:
 
         manual_queue = (
             build_manual_equipment_queue()
         )
 
-        await state.update_data(
+    await state.update_data(
 
-            equipment_results=
-                equipment_results,
+        equipment_results=
+            equipment_results,
 
-            manual_equipment_queue=
-                manual_queue,
+        manual_equipment_queue=
+            manual_queue,
 
-            manual_equipment_index=
-                0,
+        manual_equipment_index=
+            data.get(
+                "manual_equipment_index",
+                0
+            )
+    )
 
-            photo_paths=
-                photo_paths
-        )
+    await state.set_state(
+        InspectionForm.manual_equipment
+    )
 
-        await message.answer(
+    await message.answer(
 
-            "Фотографии загружены.\n\n"
-            "Теперь заполним комплектацию вручную.\n"
-            "Для каждого пункта выберите:\n"
-            "Есть / Нет / Пропустить."
-        )
+        f"📷 Получено фотографий: "
+        f"{len(photo_ids)}.\n\n"
 
-        await state.set_state(
-            InspectionForm.manual_equipment
-        )
+        "Фотографии сохранены в Telegram.\n"
+        "При формировании PDF они будут автоматически загружены.\n\n"
 
-        await ask_next_manual_equipment(
-            message,
-            state
-        )
+        "Теперь заполним комплектацию вручную.",
 
-    except Exception as e:
+        reply_markup=back_keyboard
+    )
 
-        print(
-            "PHOTO / REPORT ERROR:",
-            repr(e)
-        )
-
-        cleanup_photo_paths(
-            photo_paths
-        )
-
-        await state.clear()
-
-        await message.answer(
-
-            "Произошла ошибка при загрузке фотографий.\n\n"
-            "Проверь логи Render."
-        )
+    await ask_next_manual_equipment(
+        message,
+        state
+    )
 
 
 # =========================================================
@@ -3668,6 +5876,16 @@ async def manual_equipment_callback(
 
     await callback.answer()
 
+    try:
+
+        await callback.message.edit_reply_markup(
+            reply_markup=None
+        )
+
+    except Exception:
+
+        pass
+
     if next_index < len(queue):
 
         next_item = queue[
@@ -3691,6 +5909,119 @@ async def manual_equipment_callback(
                 next_option
         )
 
+        await callback.message.answer(
+
+            f"🧰 <b>ПРОВЕРКА КОМПЛЕКТАЦИИ</b>\n\n"
+            f"Позиция: {next_index + 1} из {len(queue)}\n"
+            f"Раздел: {next_category}\n"
+            f"Опция: {next_option}\n\n"
+            f"Укажите результат:",
+
+            parse_mode="HTML",
+
+            reply_markup=
+                manual_equipment_keyboard()
+        )
+
+        return
+
+    data = await state.get_data()
+
+    # Если это редактирование — возвращаемся в review.
+    if data.get(
+        "edit_return_to_review"
+    ):
+
+        await state.update_data(
+            edit_return_to_review=False
+        )
+
+        await state.set_state(
+            InspectionForm.review
+        )
+
+        await callback.message.answer(
+            "🧰 Комплектация обновлена."
+        )
+
+        await show_review(
+            callback.message,
+            state
+        )
+
+        return
+
+    # Если мы возвращались назад из эндоскопии,
+    # после завершения комплектации возвращаемся туда.
+    resume_state = data.get(
+        "endoscopy_resume_state"
+    )
+
+    if resume_state:
+
+        await state.update_data(
+            endoscopy_resume_state=None
+        )
+
+        await state.set_state(
+            resume_state
+        )
+
+        await callback.message.answer(
+            "Возвращаемся к эндоскопии."
+        )
+
+        await show_current_state_prompt(
+            callback.message,
+            state
+        )
+
+        return
+
+    await state.set_state(
+        InspectionForm.endoscopy_cylinders
+    )
+
+    await callback.message.answer(
+
+        "✅ Комплектация полностью заполнена.\n\n"
+        "🔬 Теперь заполним эндоскопию двигателя.\n\n"
+        "1/7. Введите результат по цилиндрам.",
+
+        reply_markup=endoscopy_keyboard
+    )
+
+
+# =========================================================
+# НАЗАД В РУЧНОЙ КОМПЛЕКТАЦИИ
+# =========================================================
+
+@dp.callback_query(
+    InspectionForm.manual_equipment,
+    F.data == "eq_back"
+)
+async def manual_equipment_back_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await callback.answer()
+
+    data = await state.get_data()
+
+    index = data.get(
+        "manual_equipment_index",
+        0
+    )
+
+    if index > 0:
+
+        index -= 1
+
+        await state.update_data(
+            manual_equipment_index=index
+        )
+
         try:
 
             await callback.message.edit_reply_markup(
@@ -3701,18 +6032,370 @@ async def manual_equipment_callback(
 
             pass
 
-        await callback.message.answer(
-
-            f"ПРОВЕРКА КОМПЛЕКТАЦИИ\n\n"
-            f"Раздел: {next_category}\n"
-            f"Опция: {next_option}\n\n"
-            f"Укажите результат:",
-
-            reply_markup=
-                manual_equipment_keyboard()
+        await ask_next_manual_equipment(
+            callback.message,
+            state
         )
 
         return
+
+    await state.set_state(
+        InspectionForm.photos
+    )
+
+    await callback.message.answer(
+
+        "Возвращаемся к фотографиям.",
+
+        reply_markup=finish_photos_keyboard
+    )
+
+
+# =========================================================
+# ЭНДОСКОПИЯ
+# =========================================================
+
+async def save_endoscopy_value(
+    message,
+    state,
+    key,
+    value,
+    next_state,
+    prompt
+):
+
+    data = await state.get_data()
+
+    endoscopy_data = data.get(
+        "endoscopy_data",
+        {}
+    )
+
+    endoscopy_data[key] = value
+
+    await state.update_data(
+        endoscopy_data=endoscopy_data
+    )
+
+    if data.get(
+        "edit_return_to_review"
+    ) and key == "overall":
+
+        await state.update_data(
+            edit_return_to_review=False
+        )
+
+        await state.set_state(
+            InspectionForm.review
+        )
+
+        await show_review(
+            message,
+            state
+        )
+
+        return
+
+    await state.set_state(
+        next_state
+    )
+
+    await send_prompt(
+        message,
+        state,
+        prompt,
+        endoscopy_keyboard
+    )
+
+
+@dp.message(
+    InspectionForm.endoscopy_cylinders
+)
+async def endoscopy_cylinders_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
+    if not value:
+
+        await message.answer(
+            "Введите результат по цилиндрам."
+        )
+
+        return
+
+    await save_endoscopy_value(
+
+        message,
+        state,
+
+        "cylinders",
+        value,
+
+        InspectionForm.endoscopy_cylinder_walls,
+
+        "2/7. Опишите стенки цилиндров."
+    )
+
+
+@dp.message(
+    InspectionForm.endoscopy_cylinder_walls
+)
+async def endoscopy_walls_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
+    if not value:
+
+        await message.answer(
+            "Введите состояние стенок цилиндров."
+        )
+
+        return
+
+    await save_endoscopy_value(
+
+        message,
+        state,
+
+        "cylinder_walls",
+        value,
+
+        InspectionForm.endoscopy_pistons,
+
+        "3/7. Опишите состояние поршней."
+    )
+
+
+@dp.message(
+    InspectionForm.endoscopy_pistons
+)
+async def endoscopy_pistons_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
+    if not value:
+
+        await message.answer(
+            "Введите состояние поршней."
+        )
+
+        return
+
+    await save_endoscopy_value(
+
+        message,
+        state,
+
+        "pistons",
+        value,
+
+        InspectionForm.endoscopy_scoring,
+
+        "4/7. Опишите наличие или отсутствие задиров."
+    )
+
+
+@dp.message(
+    InspectionForm.endoscopy_scoring
+)
+async def endoscopy_scoring_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
+    if not value:
+
+        await message.answer(
+            "Введите информацию о задирах."
+        )
+
+        return
+
+    await save_endoscopy_value(
+
+        message,
+        state,
+
+        "scoring",
+        value,
+
+        InspectionForm.endoscopy_carbon,
+
+        "5/7. Опишите наличие или отсутствие нагара."
+    )
+
+
+@dp.message(
+    InspectionForm.endoscopy_carbon
+)
+async def endoscopy_carbon_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
+    if not value:
+
+        await message.answer(
+            "Введите информацию о нагаре."
+        )
+
+        return
+
+    await save_endoscopy_value(
+
+        message,
+        state,
+
+        "carbon",
+        value,
+
+        InspectionForm.endoscopy_oil,
+
+        "6/7. Опишите наличие или отсутствие масла."
+    )
+
+
+@dp.message(
+    InspectionForm.endoscopy_oil
+)
+async def endoscopy_oil_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
+    if not value:
+
+        await message.answer(
+            "Введите информацию о следах масла."
+        )
+
+        return
+
+    await save_endoscopy_value(
+
+        message,
+        state,
+
+        "oil",
+        value,
+
+        InspectionForm.endoscopy_overall,
+
+        "7/7. Введите общее состояние двигателя по результатам эндоскопии."
+    )
+
+
+@dp.message(
+    InspectionForm.endoscopy_overall
+)
+async def endoscopy_overall_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    value = (
+        message.text or ""
+    ).strip()
+
+    if not value:
+
+        await message.answer(
+            "Введите общее состояние двигателя."
+        )
+
+        return
+
+    data = await state.get_data()
+
+    endoscopy_data = data.get(
+        "endoscopy_data",
+        {}
+    )
+
+    endoscopy_data["overall"] = value
+
+    await state.update_data(
+        endoscopy_data=endoscopy_data
+    )
+
+    if data.get(
+        "edit_return_to_review"
+    ):
+
+        await state.update_data(
+            edit_return_to_review=False
+        )
+
+        await state.set_state(
+            InspectionForm.review
+        )
+
+        await message.answer(
+            "🔬 Эндоскопия обновлена."
+        )
+
+        await show_review(
+            message,
+            state
+        )
+
+        return
+
+    await state.set_state(
+        InspectionForm.review
+    )
+
+    await message.answer(
+        "✅ Эндоскопия заполнена."
+    )
+
+    await show_review(
+        message,
+        state
+    )
+
+
+# =========================================================
+# REVIEW CALLBACKS
+# =========================================================
+
+@dp.callback_query(
+    InspectionForm.review,
+    F.data == "review_pdf"
+)
+async def review_pdf_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await callback.answer()
 
     try:
 
@@ -3724,111 +6407,281 @@ async def manual_equipment_callback(
 
         pass
 
-    await state.set_state(InspectionForm.endoscopy_cylinders)
-
-    await callback.message.answer(
-        "Комплектация полностью заполнена.\n\n"
-        "Теперь заполним эндоскопию двигателя вручную.\n\n"
-        "1/7. Введите результат по цилиндрам."
+    await generate_and_send_report(
+        callback.message,
+        state
     )
 
 
+@dp.callback_query(
+    InspectionForm.review,
+    F.data == "review_edit"
+)
+async def review_edit_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await callback.answer()
+
+    await state.set_state(
+        InspectionForm.edit_menu
+    )
+
+    await callback.message.answer(
+
+        "✏️ <b>Что хотите изменить?</b>\n\n"
+        "После изменения бот вернёт вас обратно "
+        "к финальной проверке.",
+
+        parse_mode="HTML",
+
+        reply_markup=edit_menu_keyboard()
+    )
+
 
 # =========================================================
-# ЭНДОСКОПИЯ — РУЧНОЙ ВВОД
+# EDIT MENU
 # =========================================================
 
-async def save_endoscopy_value(message, state, key, value, next_state, prompt):
+@dp.callback_query(
+    InspectionForm.edit_menu,
+    F.data == "edit_back"
+)
+async def edit_back_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await callback.answer()
+
+    await state.set_state(
+        InspectionForm.review
+    )
+
+    await show_review(
+        callback.message,
+        state
+    )
+
+
+@dp.callback_query(
+    InspectionForm.edit_menu,
+    F.data == "edit_car"
+)
+async def edit_car_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await callback.answer()
+
+    await state.update_data(
+        edit_return_to_review=True
+    )
+
+    await state.set_state(
+        InspectionForm.master_name
+    )
+
+    await callback.message.answer(
+        "✏️ Изменение данных автомобиля.\n\n"
+        "Введите имя мастера.",
+        reply_markup=back_keyboard
+    )
+
+
+@dp.callback_query(
+    InspectionForm.edit_menu,
+    F.data == "edit_lkp"
+)
+async def edit_lkp_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await callback.answer()
+
+    await state.update_data(
+        edit_return_to_review=True,
+        lkp_index=0
+    )
+
+    await state.set_state(
+        InspectionForm.lkp
+    )
+
+    await callback.message.answer(
+
+        f"✏️ Изменение ЛКП.\n\n"
+        f"Деталь: {LKP_PARTS[0]}\n\n"
+        f"Введите значение:",
+
+        reply_markup=back_keyboard
+    )
+
+
+@dp.callback_query(
+    InspectionForm.edit_menu,
+    F.data == "edit_photos"
+)
+async def edit_photos_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await callback.answer()
+
+    await state.update_data(
+        edit_return_to_review=True
+    )
+
+    await state.set_state(
+        InspectionForm.photos
+    )
+
     data = await state.get_data()
-    endoscopy_data = data.get("endoscopy_data", {})
-    endoscopy_data[key] = value
-    await state.update_data(endoscopy_data=endoscopy_data)
-    await state.set_state(next_state)
-    await message.answer(prompt)
+
+    await callback.message.answer(
+
+        f"✏️ Фотографии.\n\n"
+        f"Сейчас сохранено: "
+        f"{len(data.get('photos', []))}\n\n"
+        f"Можешь добавить новые фотографии.\n"
+        f"Когда закончишь — нажми «Готово».",
+
+        reply_markup=finish_photos_keyboard
+    )
 
 
-@dp.message(InspectionForm.endoscopy_cylinders)
-async def endoscopy_cylinders_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
-    if not value:
-        await message.answer("Введите результат по цилиндрам.")
-        return
-    await save_endoscopy_value(message, state, "cylinders", value,
-                               InspectionForm.endoscopy_cylinder_walls,
-                               "2/7. Опишите стенки цилиндров.")
+@dp.callback_query(
+    InspectionForm.edit_menu,
+    F.data == "edit_equipment"
+)
+async def edit_equipment_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
 
+    await callback.answer()
 
-@dp.message(InspectionForm.endoscopy_cylinder_walls)
-async def endoscopy_walls_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
-    if not value:
-        await message.answer("Введите состояние стенок цилиндров.")
-        return
-    await save_endoscopy_value(message, state, "cylinder_walls", value,
-                               InspectionForm.endoscopy_pistons,
-                               "3/7. Опишите состояние поршней.")
-
-
-@dp.message(InspectionForm.endoscopy_pistons)
-async def endoscopy_pistons_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
-    if not value:
-        await message.answer("Введите состояние поршней.")
-        return
-    await save_endoscopy_value(message, state, "pistons", value,
-                               InspectionForm.endoscopy_scoring,
-                               "4/7. Опишите наличие или отсутствие задиров.")
-
-
-@dp.message(InspectionForm.endoscopy_scoring)
-async def endoscopy_scoring_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
-    if not value:
-        await message.answer("Введите информацию о задирах.")
-        return
-    await save_endoscopy_value(message, state, "scoring", value,
-                               InspectionForm.endoscopy_carbon,
-                               "5/7. Опишите наличие или отсутствие нагара.")
-
-
-@dp.message(InspectionForm.endoscopy_carbon)
-async def endoscopy_carbon_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
-    if not value:
-        await message.answer("Введите информацию о нагаре.")
-        return
-    await save_endoscopy_value(message, state, "carbon", value,
-                               InspectionForm.endoscopy_oil,
-                               "6/7. Опишите наличие или отсутствие масла.")
-
-
-@dp.message(InspectionForm.endoscopy_oil)
-async def endoscopy_oil_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
-    if not value:
-        await message.answer("Введите информацию о следах масла.")
-        return
-    await save_endoscopy_value(message, state, "oil", value,
-                               InspectionForm.endoscopy_overall,
-                               "7/7. Введите общее состояние двигателя по результатам эндоскопии.")
-
-
-@dp.message(InspectionForm.endoscopy_overall)
-async def endoscopy_overall_handler(message: types.Message, state: FSMContext):
-    value = (message.text or "").strip()
-    if not value:
-        await message.answer("Введите общее состояние двигателя.")
-        return
     data = await state.get_data()
-    endoscopy_data = data.get("endoscopy_data", {})
-    endoscopy_data["overall"] = value
-    await state.update_data(endoscopy_data=endoscopy_data)
-    await message.answer("Эндоскопия заполнена. Формирую PDF-отчёт...")
-    await generate_and_send_report(message, state)
+
+    equipment_results = data.get(
+        "equipment_results"
+    )
+
+    if not equipment_results:
+
+        equipment_results = (
+            create_empty_equipment_results(
+
+                body_type=data[
+                    "body_type"
+                ],
+
+                body_color=data[
+                    "body_color"
+                ],
+
+                wheel_radius=data[
+                    "wheel_radius"
+                ],
+
+                paint_type=data[
+                    "paint_type"
+                ],
+
+                display_size=data[
+                    "display_size"
+                ],
+
+                seat_material=data[
+                    "seat_material"
+                ],
+
+                wheel_type=data[
+                    "wheel_type"
+                ],
+
+                interior_color=data[
+                    "interior_color"
+                ],
+
+                seat_count=data[
+                    "seat_count"
+                ],
+
+                audio_system_name=data[
+                    "audio_system_name"
+                ],
+
+                speaker_count=data[
+                    "speaker_count"
+                ]
+            )
+        )
+
+    queue = build_manual_equipment_queue()
+
+    await state.update_data(
+
+        edit_return_to_review=True,
+
+        equipment_results=
+            equipment_results,
+
+        manual_equipment_queue=
+            queue,
+
+        manual_equipment_index=
+            0
+    )
+
+    await state.set_state(
+        InspectionForm.manual_equipment
+    )
+
+    await callback.message.answer(
+        "✏️ Изменение комплектации.",
+    )
+
+    await ask_next_manual_equipment(
+        callback.message,
+        state
+    )
+
+
+@dp.callback_query(
+    InspectionForm.edit_menu,
+    F.data == "edit_endoscopy"
+)
+async def edit_endoscopy_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    await callback.answer()
+
+    await state.update_data(
+        edit_return_to_review=True
+    )
+
+    await state.set_state(
+        InspectionForm.endoscopy_cylinders
+    )
+
+    await callback.message.answer(
+
+        "✏️ Изменение эндоскопии.\n\n"
+        "1/7. Введите результат по цилиндрам.",
+
+        reply_markup=endoscopy_keyboard
+    )
 
 
 # =========================================================
-# ЕСЛИ ПРИ РУЧНОЙ ПРОВЕРКЕ ПРИШЁЛ ТЕКСТ
+# ТЕКСТ ПРИ РУЧНОЙ КОМПЛЕКТАЦИИ
 # =========================================================
 
 @dp.message(
@@ -3846,7 +6699,7 @@ async def manual_equipment_text_handler(
 
 
 # =========================================================
-# ЕСЛИ ВМЕСТО ФОТО ПРИШЁЛ ТЕКСТ
+# ТЕКСТ ВМЕСТО ФОТО
 # =========================================================
 
 @dp.message(
@@ -3859,7 +6712,7 @@ async def photos_text_handler(
 
     await message.answer(
 
-        "Отправляй фотографии автомобиля.\n\n"
+        "📷 Отправляй фотографии автомобиля.\n\n"
         "Когда закончишь — нажми «Готово»."
     )
 
@@ -3922,6 +6775,10 @@ async def main():
 
     print(
         "MODE: MANUAL INSPECTION"
+    )
+
+    print(
+        f"FSM DATABASE: {DB_PATH}"
     )
 
     await dp.start_polling(

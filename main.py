@@ -38,6 +38,111 @@ from reportlab.platypus import (
     PageBreak,
     Image as RLImage,
 )
+
+# Язык формируемого PDF: русский по умолчанию, немецкий для второго документа.
+PDF_LANGUAGE = "ru"
+
+PDF_DE_TRANSLATIONS = {
+    "ЛК Авто Рус": "LK Auto Rus",
+    "АКТ ОСМОТРА АВТОМОБИЛЯ": "FAHRZEUGPRÜFBERICHT",
+    "ОТЧЁТ ОБ ОСМОТРЕ": "FAHRZEUGPRÜFBERICHT",
+    "АВТОМОБИЛЯ": "",
+    "Профессиональный отчёт осмотра": "Professioneller Fahrzeugprüfbericht",
+    "МАРКА": "MARKE", "МОДЕЛЬ": "MODELL", "ГОД ВЫПУСКА": "BAUJAHR",
+    "ПРОБЕГ": "KILOMETERSTAND", "ТИП КУЗОВА": "KAROSSERIEFORM",
+    "ЦВЕТ": "FARBE", "РАЗМЕР КОЛЁС": "RADGRÖSSE", "ПРИВОД": "ANTRIEB",
+    "ТИП ДВИГАТЕЛЯ": "MOTORTYP", "ОБЪЁМ ДВИГАТЕЛЯ": "HUBRAUM",
+    "МОЩНОСТЬ": "LEISTUNG", "КОРОБКА ПЕРЕДАЧ": "GETRIEBE",
+    "Дата формирования отчёта": "Berichtsdatum", "Мастер осмотра": "Prüfer",
+    "МАСТЕР ОСМОТРА": "FAHRZEUGPRÜFER", "ПОДПИСЬ / ПЕЧАТЬ": "UNTERSCHRIFT / STEMPEL",
+    "КАРТА ЛАКОКРАСОЧНОГО ПОКРЫТИЯ": "LACKSCHICHTMESSUNG",
+    "Измерения указаны в микрометрах (µm)": "Messwerte in Mikrometern (µm)",
+    "Капот": "Motorhaube", "Крыша": "Dach", "Крышка багажника": "Kofferraumdeckel",
+    "Переднее левое крыло": "Vorderer linker Kotflügel", "Передняя левая дверь": "Vordere linke Tür",
+    "Задняя левая дверь": "Hintere linke Tür", "Заднее левое крыло": "Hinterer linker Kotflügel",
+    "Переднее правое крыло": "Vorderer rechter Kotflügel", "Передняя правая дверь": "Vordere rechte Tür",
+    "Задняя правая дверь": "Hintere rechte Tür", "Заднее правое крыло": "Hinterer rechter Kotflügel",
+    "Все значения указаны в микрометрах (µm).": "Alle Werte sind in Mikrometern (µm) angegeben.",
+    "КОМПЛЕКТАЦИЯ И ОСНАЩЕНИЕ": "AUSSTATTUNG",
+    "Перечень оборудования автомобиля": "Fahrzeugausstattung",
+    "ЭНДОСКОПИЯ ДВИГАТЕЛЯ": "MOTOR-ENDOSKOPIE",
+    "Поршни": "Kolben", "Масляные следы": "Ölspuren", "Общее состояние": "Gesamtzustand",
+    "Состояние цилиндров": "Zylinderzustand", "Состояние поршней": "Kolbenzustand",
+    "Состояние стенок цилиндров": "Zustand der Zylinderwände",
+    "Раздел эндоскопического осмотра": "Abschnitt zur endoskopischen Prüfung",
+    "Параметр": "Parameter", "Результат": "Ergebnis", "Цилиндры": "Zylinder",
+    "Стенки цилиндров": "Zylinderwände", "Поршни": "Kolben",
+    "Задиры": "Riefen", "Нагар": "Kohlenstoffablagerungen", "Масло": "Öl",
+    "ОПЦИЯ": "AUSSTATTUNG", "РЕЗУЛЬТАТ": "ERGEBNIS",
+    "ЭКСТЕРЬЕР": "EXTERIEUR", "ИНТЕРЬЕР": "INTERIEUR", "КОМФОРТ": "KOMFORT",
+    "МУЛЬТИМЕДИА": "MULTIMEDIA", "БЕЗОПАСНОСТЬ": "SICHERHEIT",
+    "ДОПОЛНИТЕЛЬНЫЕ ОПЦИИ": "ZUSATZAUSSTATTUNG",
+    "Тип кузова": "Karosserieform", "Цвет кузова": "Karosseriefarbe",
+    "Тип лакокрасочного покрытия": "Lackart", "LED-фары": "LED-Scheinwerfer",
+    "Ксеноновые фары": "Xenon-Scheinwerfer", "Галогенные фары": "Halogenscheinwerfer",
+    "Матричные фары": "Matrix-Scheinwerfer", "Дневные ходовые огни": "Tagfahrlicht",
+    "Автоматический дальний свет": "Fernlichtassistent", "Противотуманные фары": "Nebelscheinwerfer",
+    "Омыватели фар": "Scheinwerferreinigungsanlage", "Датчик света": "Lichtsensor",
+    "Датчик дождя": "Regensensor", "Электрорегулировка зеркал": "Elektrische Spiegelverstellung",
+    "Обогрев зеркал": "Beheizbare Außenspiegel", "Электроскладывание зеркал": "Elektrisch anklappbare Spiegel",
+    "Автозатемнение зеркала": "Automatisch abblendender Spiegel", "Панорамная крыша": "Panoramadach",
+    "Люк": "Schiebedach", "Рейлинги": "Dachreling", "Спойлер": "Spoiler",
+    "Размер колёс": "Radgröße", "Размер дисплея": "Displaygröße", "Тип дисков": "Felgentyp",
+    "Материал сидений": "Sitzmaterial", "Цвет салона": "Innenraumfarbe", "Количество мест": "Sitzplätze",
+    "Кожаный салон": "Lederausstattung", "Тканевый салон": "Stoffausstattung",
+    "Спортивные сиденья": "Sportsitze", "Электрорегулировка сидений": "Elektrische Sitzverstellung",
+    "Подогрев передних сидений": "Sitzheizung vorne", "Подогрев задних сидений": "Sitzheizung hinten",
+    "Вентиляция сидений": "Sitzbelüftung", "Массаж сидений": "Massagefunktion der Sitze",
+    "Подогрев руля": "Lenkradheizung", "Мультируль": "Multifunktionslenkrad",
+    "Цифровая приборная панель": "Digitales Kombiinstrument", "Амбиентная подсветка": "Ambientebeleuchtung",
+    "Кондиционер": "Klimaanlage", "Климат-контроль": "Klimaautomatik", "Двухзонный климат": "2-Zonen-Klimaautomatik",
+    "Трёхзонный климат": "3-Zonen-Klimaautomatik", "Бесключевой доступ": "Keyless Entry",
+    "Запуск двигателя кнопкой": "Motorstart per Knopfdruck", "Круиз-контроль": "Tempomat",
+    "Адаптивный круиз-контроль": "Adaptiver Tempomat", "Электропривод окон": "Elektrische Fensterheber",
+    "Центральный замок": "Zentralverriegelung", "Подогрев лобового стекла": "Beheizbare Windschutzscheibe",
+    "Беспроводная зарядка": "Kabelloses Laden", "Камера заднего вида": "Rückfahrkamera",
+    "Камеры 360°": "360°-Kameras", "Передние парктроники": "Einparkhilfe vorne",
+    "Задние парктроники": "Einparkhilfe hinten", "Контроль слепых зон": "Totwinkelassistent",
+    "Предупреждение о столкновении": "Kollisionswarnung", "Автоматическое экстренное торможение": "Notbremsassistent",
+    "Контроль полосы движения": "Spurüberwachung", "Удержание в полосе": "Spurhalteassistent",
+    "Распознавание дорожных знаков": "Verkehrszeichenerkennung", "Контроль давления в шинах": "Reifendruckkontrolle",
+    "Есть": "Vorhanden", "Нет": "Nein", "Не заполнено": "Nicht ausgefüllt",
+    "Ручной ввод": "Manuelle Eingabe", "Заполнено": "Ausgefüllt",
+    "Бензин": "Benzin", "Дизель": "Diesel", "Гибрид": "Hybrid", "Электро": "Elektro",
+    "МКПП": "Schaltgetriebe", "АКПП": "Automatik", "Робот": "Doppelkupplungsgetriebe", "Вариатор": "CVT",
+    " л.с.": " PS", " л": " l", " км": " km", "Страница ": "Seite ",
+}
+
+def pdf_translate(value):
+    if PDF_LANGUAGE != "de" or not isinstance(value, str):
+        return value
+    result = value
+    for ru, de in sorted(PDF_DE_TRANSLATIONS.items(), key=lambda item: len(item[0]), reverse=True):
+        result = result.replace(ru, de)
+    return result
+
+_original_Paragraph = Paragraph
+_original_Table = Table
+def Paragraph(*args, **kwargs):
+    args = list(args)
+    if args and isinstance(args[0], str):
+        args[0] = pdf_translate(args[0])
+    return _original_Paragraph(*args, **kwargs)
+
+def _translate_table_data(value):
+    if isinstance(value, str):
+        return pdf_translate(value)
+    if isinstance(value, list):
+        return [_translate_table_data(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_translate_table_data(item) for item in value)
+    return value
+
+def Table(*args, **kwargs):
+    args = list(args)
+    if args:
+        args[0] = _translate_table_data(args[0])
+    return _original_Table(*args, **kwargs)
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
@@ -1367,14 +1472,14 @@ def make_lkp_map(
 
     draw.text(
         (60, 45),
-        "КАРТА ЛАКОКРАСОЧНОГО ПОКРЫТИЯ",
+        pdf_translate("КАРТА ЛАКОКРАСОЧНОГО ПОКРЫТИЯ"),
         font=title_font,
         fill=(255, 255, 255)
     )
 
     draw.text(
         (60, 110),
-        "ЮМАКС",
+        pdf_translate("ЛК Авто Рус"),
         font=subtitle_font,
         fill=(70, 190, 130)
     )
@@ -1519,7 +1624,7 @@ def make_lkp_map(
                 x + 18,
                 y + 12
             ),
-            text,
+            pdf_translate(text),
             font=label_font,
             fill=(245, 245, 245)
         )
@@ -1639,7 +1744,7 @@ def make_lkp_map(
 
     draw.text(
         (60, 1270),
-        "Измерения указаны в микрометрах (µm)",
+        pdf_translate("Измерения указаны в микрометрах (µm)"),
         font=subtitle_font,
         fill=(180, 185, 190)
     )
@@ -1694,7 +1799,7 @@ def pdf_header_footer(
     canvas.drawString(
         15 * mm,
         height - 13 * mm,
-        "ЮМАКС"
+        pdf_translate("ЛК Авто Рус")
     )
 
     canvas.setFont(
@@ -1709,7 +1814,7 @@ def pdf_header_footer(
     canvas.drawRightString(
         width - 15 * mm,
         height - 13 * mm,
-        "АКТ ОСМОТРА АВТОМОБИЛЯ"
+        pdf_translate("АКТ ОСМОТРА АВТОМОБИЛЯ")
     )
 
     canvas.setFillColor(
@@ -1724,13 +1829,13 @@ def pdf_header_footer(
     canvas.drawString(
         15 * mm,
         10 * mm,
-        "ЮМАКС"
+        pdf_translate("ЛК Авто Рус")
     )
 
     canvas.drawRightString(
         width - 15 * mm,
         10 * mm,
-        f"Страница {doc.page}"
+        pdf_translate(f"Страница {doc.page}")
     )
 
     canvas.restoreState()
@@ -2059,8 +2164,12 @@ def create_pdf(
     report_date,
     photo_paths=None,
     equipment_results=None,
-    endoscopy_data=None
+    endoscopy_data=None,
+    language="ru"
 ):
+
+    global PDF_LANGUAGE
+    PDF_LANGUAGE = language
 
     if photo_paths is None:
         photo_paths = []
@@ -2087,9 +2196,9 @@ def create_pdf(
 
         bottomMargin=18 * mm,
 
-        title="ЮМАКС — Акт осмотра автомобиля",
+        title="ЛК Авто Рус — Акт осмотра автомобиля",
 
-        author="ЮМАКС",
+        author="ЛК Авто Рус",
     )
 
     title_style = ParagraphStyle(
@@ -2173,7 +2282,7 @@ def create_pdf(
 
         Paragraph(
 
-            "ЮМАКС",
+            "ЛК Авто Рус",
 
             ParagraphStyle(
                 "Brand",
@@ -3219,7 +3328,7 @@ async def download_report_photos(
         )
 
         unique_name = (
-            f"yurmax_"
+            f"lk_auto_rus_"
             f"{uuid.uuid4().hex}_"
             f"{number}.jpg"
         )
@@ -3307,64 +3416,33 @@ async def generate_and_send_report(
                 data["gearbox"],
         }
 
-        pdf = create_pdf(
-
+        report_args = dict(
             car_data=car_data,
-
-            measurements=data[
-                "measurements"
-            ],
-
-            master_name=data[
-                "master_name"
-            ],
-
-            report_date=data[
-                "report_date"
-            ],
-
+            measurements=data["measurements"],
+            master_name=data["master_name"],
+            report_date=data["report_date"],
             photo_paths=photo_paths,
+            equipment_results=data.get("equipment_results", {}),
+            endoscopy_data=data.get("endoscopy_data", {})
+        )
 
-            equipment_results=data.get(
-                "equipment_results",
-                {}
-            ),
-
-            endoscopy_data=data.get(
-                "endoscopy_data",
-                {}
+        for language, language_suffix in (("ru", "RU"), ("de", "DE")):
+            pdf = create_pdf(**report_args, language=language)
+            filename = (
+                f"LK_AUTO_RUS_{language_suffix}_"
+                f"{data['make']}_{data['model']}_AKT_OSMOTRA.pdf"
             )
-        )
-
-        filename = (
-            "YURMAX_"
-            f"{data['make']}_"
-            f"{data['model']}_"
-            "AKT_OSMOTRA.pdf"
-        )
-
-        filename = filename.replace(
-            "/",
-            "_"
-        ).replace(
-            "\\",
-            "_"
-        )
-
-        await message.answer_document(
-
-            types.BufferedInputFile(
-
-                pdf.read(),
-
-                filename=filename
+            filename = filename.replace("/", "_").replace("\\", "_")
+            await message.answer_document(
+                types.BufferedInputFile(pdf.getvalue(), filename=filename)
             )
-        )
+
+        PDF_LANGUAGE = "ru"
 
         await message.answer(
 
             "✅ <b>Готово!</b>\n\n"
-            "PDF-отчёт ЮМАКС сформирован.",
+            "PDF-отчёты ЛК Авто Рус сформированы.",
 
             parse_mode="HTML",
 
@@ -3377,6 +3455,7 @@ async def generate_and_send_report(
 
     except Exception as e:
 
+        PDF_LANGUAGE = "ru"
         print(
             "PDF ERROR:",
             repr(e)
@@ -3844,7 +3923,7 @@ async def menu_handler(
 
         await message.answer(
 
-            "🏠 <b>Меню ЮМАКС</b>\n\n"
+            "🏠 <b>Меню ЛК Авто Рус</b>\n\n"
             "У тебя есть незавершённый акт.\n"
             "Данные сохранены.",
 
@@ -3857,7 +3936,7 @@ async def menu_handler(
 
         await message.answer(
 
-            "🏠 <b>Меню ЮМАКС</b>\n\n"
+            "🏠 <b>Меню ЛК Авто Рус</b>\n\n"
             "Можно создать новый акт.",
 
             parse_mode="HTML",
@@ -4230,7 +4309,7 @@ async def start_handler(
 
     await message.answer(
 
-        "Добро пожаловать в ЮМАКС.\n\n"
+        "Добро пожаловать в ЛК Авто Рус.\n\n"
         "Здесь можно сформировать "
         "профессиональный отчёт осмотра автомобиля.\n\n"
         "Все данные сохраняются автоматически.",
@@ -4358,7 +4437,7 @@ async def start_new_report(
 
     await message.answer(
 
-        "🆕 <b>Новый акт ЮМАКС</b>\n\n"
+        "🆕 <b>Новый акт ЛК Авто Рус</b>\n\n"
         "Введите имя мастера осмотра.\n\n"
         "Например: Ян Ковальский",
 
@@ -6726,7 +6805,7 @@ async def health(
 ):
 
     return web.Response(
-        text="YURMAX BOT OK"
+        text="ЛК Авто Рус BOT OK"
     )
 
 
@@ -6770,7 +6849,7 @@ async def main():
     await start_web_server()
 
     print(
-        "YURMAX BOT STARTED"
+        "ЛК Авто Рус BOT STARTED"
     )
 
     print(

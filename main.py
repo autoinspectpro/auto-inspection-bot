@@ -43,7 +43,7 @@ from reportlab.platypus import (
 PDF_LANGUAGE = "ru"
 
 PDF_DE_TRANSLATIONS = {
-    "ЛК Авто Рус": "LK Auto Rus",
+    "ЛИПГУС-ГРУП": "LIPGUS-GRUP",
     "АКТ ОСМОТРА АВТОМОБИЛЯ": "FAHRZEUGPRÜFBERICHT",
     "ОТЧЁТ ОБ ОСМОТРЕ": "FAHRZEUGPRÜFBERICHT",
     "АВТОМОБИЛЯ": "",
@@ -1479,7 +1479,7 @@ def make_lkp_map(
 
     draw.text(
         (60, 110),
-        pdf_translate("ЛК Авто Рус"),
+        pdf_translate("ЛИПГУС-ГРУП"),
         font=subtitle_font,
         fill=(70, 190, 130)
     )
@@ -1799,7 +1799,7 @@ def pdf_header_footer(
     canvas.drawString(
         15 * mm,
         height - 13 * mm,
-        pdf_translate("ЛК Авто Рус")
+        pdf_translate("ЛИПГУС-ГРУП")
     )
 
     canvas.setFont(
@@ -1829,7 +1829,7 @@ def pdf_header_footer(
     canvas.drawString(
         15 * mm,
         10 * mm,
-        pdf_translate("ЛК Авто Рус")
+        pdf_translate("ЛИПГУС-ГРУП")
     )
 
     canvas.drawRightString(
@@ -2196,9 +2196,9 @@ def create_pdf(
 
         bottomMargin=18 * mm,
 
-        title="ЛК Авто Рус — Акт осмотра автомобиля",
+        title="ЛИПГУС-ГРУП — Акт осмотра автомобиля",
 
-        author="ЛК Авто Рус",
+        author="ЛИПГУС-ГРУП",
     )
 
     title_style = ParagraphStyle(
@@ -2282,7 +2282,7 @@ def create_pdf(
 
         Paragraph(
 
-            "ЛК Авто Рус",
+            "ЛИПГУС-ГРУП",
 
             ParagraphStyle(
                 "Brand",
@@ -3328,7 +3328,7 @@ async def download_report_photos(
         )
 
         unique_name = (
-            f"lk_auto_rus_"
+            f"lipgus_grup_"
             f"{uuid.uuid4().hex}_"
             f"{number}.jpg"
         )
@@ -3429,7 +3429,7 @@ async def generate_and_send_report(
         for language, language_suffix in (("ru", "RU"), ("de", "DE")):
             pdf = create_pdf(**report_args, language=language)
             filename = (
-                f"LK_AUTO_RUS_{language_suffix}_"
+                f"LIPGUS_GRUP_{language_suffix}_"
                 f"{data['make']}_{data['model']}_AKT_OSMOTRA.pdf"
             )
             filename = filename.replace("/", "_").replace("\\", "_")
@@ -3442,7 +3442,7 @@ async def generate_and_send_report(
         await message.answer(
 
             "✅ <b>Готово!</b>\n\n"
-            "PDF-отчёты ЛК Авто Рус сформированы.",
+            "PDF-отчёты ЛИПГУС-ГРУП сформированы.",
 
             parse_mode="HTML",
 
@@ -3923,7 +3923,7 @@ async def menu_handler(
 
         await message.answer(
 
-            "🏠 <b>Меню ЛК Авто Рус</b>\n\n"
+            "🏠 <b>Меню ЛИПГУС-ГРУП</b>\n\n"
             "У тебя есть незавершённый акт.\n"
             "Данные сохранены.",
 
@@ -3936,7 +3936,7 @@ async def menu_handler(
 
         await message.answer(
 
-            "🏠 <b>Меню ЛК Авто Рус</b>\n\n"
+            "🏠 <b>Меню ЛИПГУС-ГРУП</b>\n\n"
             "Можно создать новый акт.",
 
             parse_mode="HTML",
@@ -4309,7 +4309,7 @@ async def start_handler(
 
     await message.answer(
 
-        "Добро пожаловать в ЛК Авто Рус.\n\n"
+        "Добро пожаловать в ЛИПГУС-ГРУП.\n\n"
         "Здесь можно сформировать "
         "профессиональный отчёт осмотра автомобиля.\n\n"
         "Все данные сохраняются автоматически.",
@@ -4437,7 +4437,7 @@ async def start_new_report(
 
     await message.answer(
 
-        "🆕 <b>Новый акт ЛК Авто Рус</b>\n\n"
+        "🆕 <b>Новый акт ЛИПГУС-ГРУП</b>\n\n"
         "Введите имя мастера осмотра.\n\n"
         "Например: Ян Ковальский",
 
@@ -6805,7 +6805,7 @@ async def health(
 ):
 
     return web.Response(
-        text="ЛК Авто Рус BOT OK"
+        text="ЛИПГУС-ГРУП BOT OK"
     )
 
 
@@ -6849,7 +6849,7 @@ async def main():
     await start_web_server()
 
     print(
-        "ЛК Авто Рус BOT STARTED"
+        "ЛИПГУС-ГРУП BOT STARTED"
     )
 
     print(
